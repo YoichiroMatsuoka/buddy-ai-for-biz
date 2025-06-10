@@ -309,7 +309,8 @@ function HomeComponent() {
     // ローカルストレージからデータを読み込む
     const loadMedicalRecord = (): MedicalRecord => {
       try {
-        if (typeof window !== 'undefined') {
+        // ブラウザ環境かどうかを確認
+        if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
           const saved = localStorage.getItem('buddyai-medical-record');
           if (saved) {
             const parsed = JSON.parse(saved);
@@ -373,7 +374,8 @@ function HomeComponent() {
   // ローカルストレージ管理
   const saveMedicalRecord = (record: MedicalRecord) => {
     try {
-      if (typeof window !== 'undefined') {
+      // ブラウザ環境かどうかを確認
+      if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
         localStorage.setItem('buddyai-medical-record', JSON.stringify(record));
       }
     } catch (error) {
@@ -2754,7 +2756,7 @@ const AIInterviewModal = ({
       setInsights([]);
       setShowAnswerHistory(false);
     }
-  }, [isOpen, userProfile]);
+  }, [isOpen, userProfile, generateQuestions]);
 
   if (!isOpen) return null;
 
