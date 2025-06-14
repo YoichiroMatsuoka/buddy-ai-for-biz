@@ -10,6 +10,25 @@ interface Message {
   attachment?: File;
 }
 
+// プロジェクトカルテ関連のインターフェース
+interface Project {
+  id: string;
+  project_name: string;
+  objectives: string;
+  project_period?: any;
+  project_purpose?: string;
+  project_goals?: string;
+  user_role?: string;
+  user_personal_goals?: any;
+  kpis?: any;
+  important_decisions?: any;
+  ai_auto_update_enabled?: boolean;
+  created_at: string;
+  updated_at: string;
+  project_stakeholders?: any[];
+  project_documents?: any[];
+}
+
 // 拡張UserProfile interface
 interface EnhancedUserProfile {
   name: string;
@@ -276,8 +295,17 @@ function HomeComponent() {
   const [editingContent, setEditingContent] = useState('');
 
   // 画面遷移管理用のState
-  const [currentPage, setCurrentPage] = useState<'home' | 'session'>('home');
+  const [currentPage, setCurrentPage] = useState<'home' | 'session' | 'projects'>('home');
   const [selectedCoachForSession, setSelectedCoachForSession] = useState<CoachId>('tanaka');
+
+  // プロジェクトカルテ関連のState
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  const [showProjectModal, setShowProjectModal] = useState(false);
+  const [showProjectSelectionModal, setShowProjectSelectionModal] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [sessionId, setSessionId] = useState<string>('');
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'session'>('home');
 
   // マイページ機能用のState
   const [medicalRecord, setMedicalRecord] = useState<MedicalRecord>({
@@ -344,7 +372,27 @@ function HomeComponent() {
 
     const savedRecord = loadMedicalRecord();
     setMedicalRecord(savedRecord);
+    
+    // プロジェクト一覧を取得
+    fetchProjects();
   }, []);
+
+  // プロジェクト一覧取得
+  const fetchProjects = async () => {
+    try {
+      const response = await fetch('/api/projects', {
+        headers: {
+          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setProjects(data.projects || []);
+      }
+    } catch (error) {
+      console.error('プロジェクト取得エラー:', error);
+    }
+  };
 
   // Rate Limitカウントダウン用のuseEffect
   useEffect(() => {
@@ -381,6 +429,47 @@ function HomeComponent() {
     } catch (error) {
       console.error('マイページ保存エラー:', error);
     }
+  };
+
+  // セッション開始時の処理（プロジェクトカルテ統合版）
+  const handleStartSession = async (projectIds: string[], action: 'existing' | 'new' | 'none') => {
+    if (action === 'new') {
+      // 新規プロジェクト作成モーダルを開く
+      setShowProjectModal(true);
+      return;
+    }
+
+    // セッションを開始
+    const newSessionId = `session_${Date.now()}`;
+    
+    // プロジェクトとセッションを紐付け
+    if (action === 'existing' && projectIds.length > 0) {
+      for (const projectId of projectIds) {
+        await fetch('/api/session-projects', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            session_id: newSessionId,
+            project_id: projectId,
+            is_primary: projectIds[0] === projectId // 最初のプロジェクトを主とする
+          })
+        });
+      }
+      
+      // 選択されたプロジェクト情報を状態に保存
+      setSelectedProjects(projectIds);
+    }
+
+    // セッション画面に遷移
+    setCurrentScreen('session');
+    setSessionId(newSessionId);
+    setCurrentPage('session');
+    setConversation([]);
+    setHasInitialMessage(false);
+    setCurrentSessionStart(null);
+    setTimeout(() => showInitialMessage(), 100);
   };
 
   // 企業と個人のマッチ度計算
@@ -520,7 +609,9 @@ function HomeComponent() {
           messages: messages,
           mode: coachId,
           userProfile: medicalRecord.userProfile,
-          industryInsights: medicalRecord.userProfile ? industryMaster[medicalRecord.userProfile.industry]?.insights : null
+          industryInsights: medicalRecord.userProfile ? industryMaster[medicalRecord.userProfile.industry]?.insights : null,
+          selectedProjects: selectedProjects,
+          sessionId: sessionId
         }),
       });
       
@@ -673,6 +764,25 @@ function HomeComponent() {
           
           return newConv;
         });
+        
+        // プロジェクトカルテのAI自動更新
+        if (selectedProjects.length > 0) {
+          selectedProjects.forEach(async (projectId) => {
+            await fetch(`/api/projects/${projectId}/ai-update`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                conversation: updatedConversation.map(msg => ({
+                  role: msg.role,
+                  content: msg.content
+                })),
+                sessionId: sessionId
+              })
+            });
+          });
+        }
       } else {
         setErrorMessage('すみません、もう一度お話しいただけますか？');
       }
@@ -833,6 +943,26 @@ function HomeComponent() {
     }
   }, [selectedCoach, hasInitialMessage, conversation.length, currentPage]);
 
+  // プロジェクト削除
+  const handleDeleteProject = async (projectId: string) => {
+    if (!confirm('このプロジェクトを削除してもよろしいですか？')) return;
+    
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, {
+        method: 'DELETE',
+        headers: {
+          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
+        }
+      });
+      
+      if (response.ok) {
+        fetchProjects();
+      }
+    } catch (error) {
+      console.error('プロジェクト削除エラー:', error);
+    }
+  };
+
   return (
     <div 
       className="min-h-screen flex flex-col"
@@ -897,6 +1027,12 @@ function HomeComponent() {
                     className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
                   >
                     🏢 ベースカルテ
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage('projects')}
+                    className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
+                  >
+                    📁 プロジェクトカルテ
                   </button>
                   {/* AIヒアリングボタン */}
                   {medicalRecord.userProfile && (medicalRecord.userProfile.profileCompleteness || 0) >= 60 && (
@@ -977,7 +1113,7 @@ function HomeComponent() {
 
                   <div className="flex flex-col items-center space-y-8">
                     <button
-                      onClick={() => setCurrentPage('session')}
+                      onClick={() => setShowProjectSelectionModal(true)}
                       className="group relative px-8 py-4 text-white text-lg font-semibold rounded-2xl transition-all transform hover:scale-105 shadow-xl"
                       style={{
                         background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
@@ -1132,11 +1268,7 @@ function HomeComponent() {
                   <button
                     onClick={() => {
                       setSelectedCoach(selectedCoachForSession);
-                      setCurrentPage('session');
-                      setConversation([]);
-                      setHasInitialMessage(false);
-                      setCurrentSessionStart(null);
-                      setTimeout(() => showInitialMessage(), 100);
+                      setShowProjectSelectionModal(true);
                     }}
                     className="group relative px-10 py-4 text-white text-lg font-semibold rounded-2xl hover:shadow-xl transition-all transform hover:scale-105"
                     style={{
@@ -1263,11 +1395,7 @@ function HomeComponent() {
                 <button
                   onClick={() => {
                     setSelectedCoach(selectedCoachForSession);
-                    setCurrentPage('session');
-                    setConversation([]);
-                    setHasInitialMessage(false);
-                    setCurrentSessionStart(null);
-                    setTimeout(() => showInitialMessage(), 100);
+                    setShowProjectSelectionModal(true);
                   }}
                   className="px-10 py-4 bg-white text-pink-600 text-lg font-bold rounded-2xl hover:bg-gray-100 transition-all transform hover:scale-105 shadow-xl"
                 >
@@ -1275,6 +1403,48 @@ function HomeComponent() {
                 </button>
               </div>
             </div>
+          </div>
+        </>
+      ) : currentPage === 'projects' ? (
+        // プロジェクトカルテ一覧画面
+        <>
+          <header className="bg-white shadow-sm border-b">
+            <div className="max-w-7xl mx-auto px-4 py-4">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center space-x-4">
+                  <button
+                    onClick={() => setCurrentPage('home')}
+                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                  >
+                    ← ホームに戻る
+                  </button>
+                  <h1 className="text-2xl font-bold text-gray-800">📁 プロジェクトカルテ管理</h1>
+                </div>
+                <button
+                  onClick={() => {
+                    setEditingProject(null);
+                    setShowProjectModal(true);
+                  }}
+                  className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-semibold"
+                >
+                  ＋ 新規プロジェクト作成
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <div className="max-w-7xl mx-auto px-4 py-8">
+            <ProjectList 
+              projects={projects}
+              onEdit={(project) => {
+                setEditingProject(project);
+                setShowProjectModal(true);
+              }}
+              onDelete={handleDeleteProject}
+              onStartSession={(projectId) => {
+                handleStartSession([projectId], 'existing');
+              }}
+            />
           </div>
         </>
       ) : (
@@ -1298,6 +1468,11 @@ function HomeComponent() {
                   </div>
                 </div>
                 <div className="flex space-x-2">
+                  {selectedProjects.length > 0 && (
+                    <div className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm">
+                      📁 {selectedProjects.length}個のプロジェクト選択中
+                    </div>
+                  )}
                   <button
                     onClick={() => setShowProfile(true)}
                     className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
@@ -1502,6 +1677,29 @@ function HomeComponent() {
         </>
       )}
 
+      {/* プロジェクト選択モーダル */}
+      <ProjectSelectionModal
+        isOpen={showProjectSelectionModal}
+        onClose={() => setShowProjectSelectionModal(false)}
+        projects={projects}
+        onStartSession={handleStartSession}
+      />
+
+      {/* プロジェクト作成/編集モーダル */}
+      <ProjectModal
+        isOpen={showProjectModal}
+        onClose={() => {
+          setShowProjectModal(false);
+          setEditingProject(null);
+        }}
+        project={editingProject}
+        onSave={() => {
+          fetchProjects();
+          setShowProjectModal(false);
+          setEditingProject(null);
+        }}
+      />
+
       {/* 拡張プロフィールモーダル */}
       <EnhancedProfileModal
         isOpen={showProfile}
@@ -1659,6 +1857,386 @@ function HomeComponent() {
   );
 }
 
+// プロジェクト一覧コンポーネント
+const ProjectList = ({ 
+  projects,
+  onEdit,
+  onDelete,
+  onStartSession
+}: {
+  projects: Project[];
+  onEdit: (project: Project) => void;
+  onDelete: (projectId: string) => void;
+  onStartSession: (projectId: string) => void;
+}) => {
+  if (projects.length === 0) {
+    return (
+      <div className="text-center py-12">
+        <div className="w-24 h-24 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
+          <svg className="w-12 h-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+        </div>
+        <p className="text-gray-500 text-lg mb-2">プロジェクトがまだありません</p>
+        <p className="text-gray-400 text-sm">新規プロジェクトを作成して、AIコーチと継続的な相談を始めましょう</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-4">
+      {projects.map((project) => (
+        <div key={project.id} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
+          <div className="flex justify-between items-start">
+            <div className="flex-1">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                {project.project_name}
+              </h3>
+              <p className="text-sm text-gray-600 line-clamp-2 mb-3">
+                {project.objectives}
+              </p>
+              <div className="flex items-center space-x-4 text-xs text-gray-500">
+                <span>最終更新: {new Date(project.updated_at).toLocaleDateString('ja-JP')}</span>
+                {project.ai_auto_update_enabled && (
+                  <span className="bg-green-100 text-green-700 px-2 py-1 rounded">
+                    AI自動更新ON
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2 ml-4">
+              <button
+                onClick={() => onStartSession(project.id)}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
+              >
+                セッション開始
+              </button>
+              <button
+                onClick={() => onEdit(project)}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm"
+              >
+                編集
+              </button>
+              <button
+                onClick={() => onDelete(project.id)}
+                className="px-4 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 transition-colors text-sm"
+              >
+                削除
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// プロジェクト選択モーダルコンポーネント
+const ProjectSelectionModal = ({ 
+  isOpen, 
+  onClose, 
+  projects,
+  onStartSession
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  projects: Project[];
+  onStartSession: (projectIds: string[], action: 'existing' | 'new' | 'none') => void;
+}) => {
+  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  const [action, setAction] = useState<'existing' | 'new' | 'none'>('none');
+
+  useEffect(() => {
+    if (projects.length > 0) {
+      setAction('existing');
+    }
+  }, [projects]);
+
+  const handleProjectToggle = (projectId: string) => {
+    setSelectedProjects(prev => 
+      prev.includes(projectId)
+        ? prev.filter(id => id !== projectId)
+        : [...prev, projectId]
+    );
+  };
+
+  const handleStart = () => {
+    if (action === 'existing' && selectedProjects.length === 0) {
+      alert('プロジェクトを選択してください');
+      return;
+    }
+    onStartSession(selectedProjects, action);
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-2xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-bold text-gray-900">どのプロジェクトについて相談しますか？</h2>
+          <button 
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-700 text-2xl"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="space-y-6">
+          {/* 既存プロジェクトの選択 */}
+          {projects.length > 0 && (
+            <div className="space-y-3">
+              <label className="block text-sm font-medium text-gray-700">
+                既存のプロジェクトから選択（複数選択可）
+              </label>
+              <div className="space-y-2 max-h-60 overflow-y-auto border rounded-lg p-3">
+                {projects.map((project) => (
+                  <div key={project.id} className="flex items-start space-x-3 p-2 hover:bg-gray-50 rounded">
+                    <input
+                      type="checkbox"
+                      id={project.id}
+                      checked={selectedProjects.includes(project.id)}
+                      onChange={() => handleProjectToggle(project.id)}
+                      disabled={action !== 'existing'}
+                      className="mt-1"
+                    />
+                    <label 
+                      htmlFor={project.id} 
+                      className="flex-1 cursor-pointer"
+                    >
+                      <div className="font-medium">{project.project_name}</div>
+                      <div className="text-sm text-gray-600 mt-1">
+                        {project.objectives}
+                      </div>
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* その他のオプション */}
+          <div className="space-y-2">
+            <label className="flex items-center space-x-2">
+              <input
+                type="radio"
+                value="new"
+                checked={action === 'new'}
+                onChange={(e) => setAction(e.target.value as any)}
+              />
+              <span>プロジェクトを新規作成してセッション開始</span>
+            </label>
+            <label className="flex items-center space-x-2">
+              <input
+                type="radio"
+                value="none"
+                checked={action === 'none'}
+                onChange={(e) => setAction(e.target.value as any)}
+              />
+              <span>プロジェクトを設定しないままセッション開始</span>
+            </label>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-4">
+            <button
+              onClick={onClose}
+              className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+            >
+              キャンセル
+            </button>
+            <button
+              onClick={handleStart}
+              className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-semibold"
+            >
+              セッション開始
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// プロジェクト作成/編集モーダルコンポーネント
+const ProjectModal = ({ 
+  isOpen, 
+  onClose, 
+  project, 
+  onSave 
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  project?: Project | null;
+  onSave: () => void;
+}) => {
+  const [formData, setFormData] = useState({
+    project_name: '',
+    objectives: '',
+    project_purpose: '',
+    project_goals: '',
+    user_role: ''
+  });
+
+  useEffect(() => {
+    if (project) {
+      setFormData({
+        project_name: project.project_name || '',
+        objectives: project.objectives || '',
+        project_purpose: project.project_purpose || '',
+        project_goals: project.project_goals || '',
+        user_role: project.user_role || ''
+      });
+    } else {
+      setFormData({
+        project_name: '',
+        objectives: '',
+        project_purpose: '',
+        project_goals: '',
+        user_role: ''
+      });
+    }
+  }, [project, isOpen]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    try {
+      const url = project 
+        ? `/api/projects/${project.id}`
+        : '/api/projects';
+      
+      const method = project ? 'PUT' : 'POST';
+      
+      const response = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
+        },
+        body: JSON.stringify(formData)
+      });
+
+      if (response.ok) {
+        onSave();
+      }
+    } catch (error) {
+      console.error('保存エラー:', error);
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-2xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-bold text-gray-900">
+            {project ? 'プロジェクト編集' : '新規プロジェクト作成'}
+          </h2>
+          <button 
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-700 text-2xl"
+          >
+            ×
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div>
+            <label htmlFor="project_name" className="block text-sm font-medium text-gray-700 mb-1">
+              プロジェクト名 <span className="text-red-500">*</span>
+            </label>
+            <input
+              id="project_name"
+              type="text"
+              value={formData.project_name}
+              onChange={(e) => setFormData({ ...formData, project_name: e.target.value })}
+              placeholder="例: 新規ECサイト立ち上げプロジェクト"
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              required
+            />
+          </div>
+
+          <div>
+            <label htmlFor="objectives" className="block text-sm font-medium text-gray-700 mb-1">
+              このプロジェクトについて、セッションで叶えたいこと、解決したい問題 <span className="text-red-500">*</span>
+            </label>
+            <textarea
+              id="objectives"
+              value={formData.objectives}
+              onChange={(e) => setFormData({ ...formData, objectives: e.target.value })}
+              placeholder="例: ECサイトの要件定義から実装まで、技術選定やチーム編成について相談したい"
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              rows={3}
+              required
+            />
+          </div>
+
+          <div>
+            <label htmlFor="project_purpose" className="block text-sm font-medium text-gray-700 mb-1">
+              プロジェクトの目的
+            </label>
+            <textarea
+              id="project_purpose"
+              value={formData.project_purpose}
+              onChange={(e) => setFormData({ ...formData, project_purpose: e.target.value })}
+              placeholder="例: 自社商品のオンライン販売チャネルを確立し、売上の30%をEC経由にする"
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              rows={2}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="project_goals" className="block text-sm font-medium text-gray-700 mb-1">
+              プロジェクトのゴール
+            </label>
+            <textarea
+              id="project_goals"
+              value={formData.project_goals}
+              onChange={(e) => setFormData({ ...formData, project_goals: e.target.value })}
+              placeholder="例: 2025年12月までにECサイトをローンチし、月商1000万円を達成する"
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              rows={2}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="user_role" className="block text-sm font-medium text-gray-700 mb-1">
+              プロジェクト内でのあなたの役割
+            </label>
+            <input
+              id="user_role"
+              type="text"
+              value={formData.user_role}
+              onChange={(e) => setFormData({ ...formData, user_role: e.target.value })}
+              placeholder="例: プロジェクトマネージャー"
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+          </div>
+
+          <div className="flex justify-end gap-2 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+            >
+              キャンセル
+            </button>
+            <button
+              type="submit"
+              className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-semibold"
+            >
+              {project ? '更新' : '作成'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 // 拡張プロフィール設定モーダルコンポーネント
 const EnhancedProfileModal = ({ 
   isOpen, 
@@ -1759,8 +2337,6 @@ const EnhancedProfileModal = ({
   // 業界自由記述時の推論機能（改善版）
   const analyzeIndustryDescription = async (description: string) => {
     if (!description.trim()) return;
-    
-   
     
     // キーワードベースの推論ロジック（大幅改善）
     const keywords = description.toLowerCase();
