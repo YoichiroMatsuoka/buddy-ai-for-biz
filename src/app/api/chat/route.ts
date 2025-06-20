@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { supabase } from '@/lib/supabase';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -180,7 +181,7 @@ function checkRateLimit(clientIP: string): { allowed: boolean; remainingRequests
 }
 
 // 業界知見を活用したシステムプロンプト生成
-function generateEnhancedSystemPrompt(coachId: string, userProfile: any, industryInsights: any): string {
+function generateEnhancedSystemPrompt(coachId: string, userProfile: any, industryInsights: any, projectDetails: any[] = []): string {
   let systemPrompt = coachPrompts[coachId as keyof typeof coachPrompts] || coachPrompts.tanaka;
   
   // プロフィール情報を組み込む
@@ -216,6 +217,28 @@ function generateEnhancedSystemPrompt(coachId: string, userProfile: any, industr
     if (userProfile.goals && userProfile.goals.length > 0) {
       systemPrompt += `\n目標: ${userProfile.goals.join('、')}`;
     }
+  }
+  
+  // プロジェクトカルテ情報を組み込む
+  if (projectDetails && projectDetails.length > 0) {
+    systemPrompt += `\n\n【プロジェクトカルテ情報】`;
+    projectDetails.forEach((project, index) => {
+      if (project) {
+        systemPrompt += `\n\n＜プロジェクト${index + 1}＞`;
+        if (project.project_name) systemPrompt += `\nプロジェクト名: ${project.project_name}`;
+        if (project.objectives) systemPrompt += `\nセッションで叶えたいこと: ${project.objectives}`;
+        if (project.project_purpose) systemPrompt += `\nプロジェクトの目的: ${project.project_purpose}`;
+        if (project.project_goals) systemPrompt += `\nプロジェクトのゴール: ${project.project_goals}`;
+        if (project.user_role) systemPrompt += `\nユーザーの役割: ${project.user_role}`;
+        if (project.stakeholders) systemPrompt += `\n関係者: ${project.stakeholders}`;
+        if (project.deliverables) systemPrompt += `\n成果物: ${project.deliverables}`;
+        if (project.timeline) systemPrompt += `\nタイムライン: ${project.timeline}`;
+        if (project.risks) systemPrompt += `\nリスク: ${project.risks}`;
+        if (project.success_criteria) systemPrompt += `\n成功基準: ${project.success_criteria}`;
+        if (project.memo) systemPrompt += `\nメモ: ${project.memo}`;
+      }
+    });
+    systemPrompt += `\n\n上記のプロジェクト情報を踏まえて、具体的で実践的なアドバイスを提供してください。`;
   }
   
   // 業界知見を活用した専門的アドバイス強化
@@ -259,6 +282,9 @@ function generateEnhancedSystemPrompt(coachId: string, userProfile: any, industr
   systemPrompt += `\n・抽象的なアドバイスではなく、具体的で実行可能なアクションプランを提示してください`;
   systemPrompt += `\n・業界特有の課題については、実績のある解決手法を積極的に活用してください`;
   systemPrompt += `\n・相手の立場や気持ちに共感しながら、前向きで建設的な提案を行ってください`;
+  if (projectDetails && projectDetails.length > 0) {
+    systemPrompt += `\n・プロジェクトカルテの内容を参照し、プロジェクトの文脈に沿ったアドバイスを行ってください`;
+  }
   
   return systemPrompt;
 }
@@ -330,7 +356,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { messages, mode, userProfile, industryInsights } = await request.json();
+    const { messages, mode, userProfile, industryInsights, selectedProjects } = await request.json();
     
     // 入力検証
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
@@ -349,9 +375,29 @@ export async function POST(request: NextRequest) {
     console.log('👤 User Profile:', userProfile?.name || 'No profile');
     console.log('🏢 Industry:', userProfile?.industry || 'Not specified');
     console.log('📊 Profile Completeness:', userProfile?.profileCompleteness || 0, '%');
+    console.log('📁 Selected Projects:', selectedProjects || 'None');
 
-    // 業界知見を活用した拡張システムプロンプト生成
-    const enhancedSystemPrompt = generateEnhancedSystemPrompt(coachId, userProfile, industryInsights);
+    // プロジェクト詳細を取得
+    let projectDetails: any[] = [];
+    if (selectedProjects && selectedProjects.length > 0) {
+      for (const projectId of selectedProjects) {
+        const { data, error } = await supabase
+          .from('projects')
+          .select('*')
+          .eq('id', projectId)
+          .single();
+        
+        if (!error && data) {
+          projectDetails.push(data);
+          console.log(`✅ Project loaded: ${data.project_name}`);
+        } else {
+          console.log(`⚠️ Failed to load project ${projectId}:`, error);
+        }
+      }
+    }
+
+    // 業界知見を活用した拡張システムプロンプト生成（プロジェクト情報を含む）
+    const enhancedSystemPrompt = generateEnhancedSystemPrompt(coachId, userProfile, industryInsights, projectDetails);
     
     console.log('💡 Enhanced System Prompt Generated:', enhancedSystemPrompt.length, 'characters');
     

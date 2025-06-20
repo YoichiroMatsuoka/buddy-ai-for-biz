@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import dynamic from 'next/dynamic';
+import { ProjectModal } from '@/components/ProjectModal';
+import ProtectedRoute from '@/components/ProtectedRoute'
+import { useAuth } from './providers/AuthProvider'
 
 interface Message {
   role: 'user' | 'assistant';
@@ -282,1655 +285,6 @@ interface MedicalRecord {
   currentGoals: string[];
 }
 
-function HomeComponent() {
-  // State管理
-  const [conversation, setConversation] = useState<Message[]>([]);
-  const [selectedCoach, setSelectedCoach] = useState<CoachId>('tanaka');
-  const [isLoading, setIsLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
-  const [textInput, setTextInput] = useState('');
-  const [isRecording, setIsRecording] = useState(false);
-  const [attachedFile, setAttachedFile] = useState<File | null>(null);
-  const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
-  const [editingContent, setEditingContent] = useState('');
-
-  // 画面遷移管理用のState
-  const [currentPage, setCurrentPage] = useState<'home' | 'session' | 'projects'>('home');
-  const [selectedCoachForSession, setSelectedCoachForSession] = useState<CoachId>('tanaka');
-
-  // プロジェクトカルテ関連のState
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
-  const [showProjectModal, setShowProjectModal] = useState(false);
-  const [showProjectSelectionModal, setShowProjectSelectionModal] = useState(false);
-  const [editingProject, setEditingProject] = useState<Project | null>(null);
-  const [sessionId, setSessionId] = useState<string>('');
-  const [currentScreen, setCurrentScreen] = useState<'home' | 'session'>('home');
-
-  // マイページ機能用のState
-  const [medicalRecord, setMedicalRecord] = useState<MedicalRecord>({
-    userProfile: null,
-    sessions: [],
-    totalSessions: 0,
-    favoriteCoach: null,
-    achievements: [],
-    currentGoals: []
-  });
-  const [showProfile, setShowProfile] = useState(false);
-  const [showMedicalRecord, setShowMedicalRecord] = useState(false);
-  const [showInterview, setShowInterview] = useState(false);
-  const [currentSessionStart, setCurrentSessionStart] = useState<Date | null>(null);
-  const [hasInitialMessage, setHasInitialMessage] = useState(false);
-
-  // Rate Limit関連のState
-  const [isRateLimited, setIsRateLimited] = useState(false);
-  const [rateLimitResetTime, setRateLimitResetTime] = useState<number | null>(null);
-  const [rateLimitCountdown, setRateLimitCountdown] = useState<number | null>(null);
-
-  // Refs
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-
-  // クライアントサイドでの初期化
-  useEffect(() => {
-    // ローカルストレージからデータを読み込む
-    const loadMedicalRecord = (): MedicalRecord => {
-      try {
-        // ブラウザ環境かどうかを確認
-        if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
-          const saved = localStorage.getItem('buddyai-medical-record');
-          if (saved) {
-            const parsed = JSON.parse(saved);
-            parsed.sessions = parsed.sessions.map((session: any) => ({
-              ...session,
-              date: new Date(session.date)
-            }));
-            if (parsed.userProfile?.createdAt) {
-              parsed.userProfile.createdAt = new Date(parsed.userProfile.createdAt);
-              parsed.userProfile.updatedAt = new Date(parsed.userProfile.updatedAt);
-              if (parsed.userProfile.interviewCompletedAt) {
-                parsed.userProfile.interviewCompletedAt = new Date(parsed.userProfile.interviewCompletedAt);
-              }
-            }
-            return parsed;
-          }
-        }
-      } catch (error) {
-        console.error('マイページ読み込みエラー:', error);
-      }
-      
-      return {
-        userProfile: null,
-        sessions: [],
-        totalSessions: 0,
-        favoriteCoach: null,
-        achievements: [],
-        currentGoals: []
-      };
-    };
-
-    const savedRecord = loadMedicalRecord();
-    setMedicalRecord(savedRecord);
-    
-    // プロジェクト一覧を取得
-    fetchProjects();
-  }, []);
-
-  // プロジェクト一覧取得
-  const fetchProjects = async () => {
-    try {
-      const response = await fetch('/api/projects', {
-        headers: {
-          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
-        }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setProjects(data.projects || []);
-      }
-    } catch (error) {
-      console.error('プロジェクト取得エラー:', error);
-    }
-  };
-
-  // Rate Limitカウントダウン用のuseEffect
-  useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    
-    if (isRateLimited && rateLimitResetTime) {
-      interval = setInterval(() => {
-        const now = Date.now();
-        const remaining = Math.max(0, Math.ceil((rateLimitResetTime - now) / 1000));
-        
-        setRateLimitCountdown(remaining);
-        
-        if (remaining <= 0) {
-          setIsRateLimited(false);
-          setRateLimitResetTime(null);
-          setRateLimitCountdown(null);
-          setErrorMessage('');
-        }
-      }, 1000);
-    }
-    
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [isRateLimited, rateLimitResetTime]);
-
-  // ローカルストレージ管理
-  const saveMedicalRecord = (record: MedicalRecord) => {
-    try {
-      // ブラウザ環境かどうかを確認
-      if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
-        localStorage.setItem('buddyai-medical-record', JSON.stringify(record));
-      }
-    } catch (error) {
-      console.error('マイページ保存エラー:', error);
-    }
-  };
-
-  // セッション開始時の処理（プロジェクトカルテ統合版）
-  const handleStartSession = async (projectIds: string[], action: 'existing' | 'new' | 'none') => {
-    if (action === 'new') {
-      // 新規プロジェクト作成モーダルを開く
-      setShowProjectModal(true);
-      return;
-    }
-
-    // セッションを開始
-    const newSessionId = `session_${Date.now()}`;
-    
-    // プロジェクトとセッションを紐付け
-    if (action === 'existing' && projectIds.length > 0) {
-      for (const projectId of projectIds) {
-        await fetch('/api/session-projects', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            session_id: newSessionId,
-            project_id: projectId,
-            is_primary: projectIds[0] === projectId // 最初のプロジェクトを主とする
-          })
-        });
-      }
-      
-      // 選択されたプロジェクト情報を状態に保存
-      setSelectedProjects(projectIds);
-    }
-
-    // セッション画面に遷移
-    setCurrentScreen('session');
-    setSessionId(newSessionId);
-    setCurrentPage('session');
-    setConversation([]);
-    setHasInitialMessage(false);
-    setCurrentSessionStart(null);
-    setTimeout(() => showInitialMessage(), 100);
-  };
-
-  // 企業と個人のマッチ度計算
-  const calculateCompanyPersonalMatch = (organizationCulture: string[], personalValues: string[]): number => {
-    if (!organizationCulture || !personalValues || organizationCulture.length === 0 || personalValues.length === 0) {
-      return 50; // デフォルト値
-    }
-
-    // 組織文化と個人価値観のマッチングロジック
-    const cultureValueMapping: { [key: string]: string[] } = {
-      '年功序列が強い': ['stability', 'tradition', 'responsibility'],
-      'フラットな組織': ['autonomy', 'flexibility', 'communication'],
-      '実力主義': ['achievement', 'competition', 'recognition'],
-      '体育会系': ['teamwork', 'competition', 'challenge'],
-      'トップダウン': ['responsibility', 'leadership', 'efficiency'],
-      'ボトムアップ': ['autonomy', 'creativity', 'diversity'],
-      '稟議制が中心': ['stability', 'detail', 'ethics'],
-      '迅速な意思決定': ['speed', 'flexibility', 'efficiency'],
-      'チームワーク重視': ['teamwork', 'relationship', 'service'],
-      '個人成果重視': ['achievement', 'autonomy', 'recognition'],
-      '安定志向': ['stability', 'tradition', 'balance'],
-      'チャレンジ志向': ['challenge', 'innovation', 'growth'],
-      '伝統的な文化': ['tradition', 'responsibility', 'stability'],
-      '革新的な文化': ['innovation', 'creativity', 'challenge']
-    };
-
-    let matchPoints = 0;
-    let totalPoints = 0;
-
-    organizationCulture.forEach(culture => {
-      const relatedValues = cultureValueMapping[culture] || [];
-      relatedValues.forEach(value => {
-        totalPoints += 1;
-        if (personalValues.includes(value)) {
-          matchPoints += 1;
-        }
-      });
-    });
-
-    // 基本マッチ度 + ボーナス計算
-    const baseMatch = totalPoints > 0 ? (matchPoints / totalPoints) * 70 : 50;
-    
-    // 価値観の多様性ボーナス（3つ以上選択で+10）
-    const diversityBonus = personalValues.length >= 3 ? 10 : 0;
-    
-    // 特定の価値観組み合わせボーナス
-    let combinationBonus = 0;
-    if (personalValues.includes('teamwork') && personalValues.includes('leadership')) combinationBonus += 5;
-    if (personalValues.includes('growth') && personalValues.includes('challenge')) combinationBonus += 5;
-    if (personalValues.includes('efficiency') && personalValues.includes('quality')) combinationBonus += 5;
-
-    return Math.min(100, Math.round(baseMatch + diversityBonus + combinationBonus));
-  };
-
-  // プロフィール管理関数
-  const saveUserProfile = (profileData: Partial<EnhancedUserProfile>) => {
-    const calculatedMatch = calculateCompanyPersonalMatch(
-      profileData.organizationCulture || [],
-      profileData.personalValues || []
-    );
-
-    const newProfile: EnhancedUserProfile = {
-      name: profileData.name || '',
-      company: profileData.company || '',
-      position: profileData.position || '',
-      department: profileData.department || '',
-      industry: profileData.industry || 'manufacturer',
-      industryDetail: profileData.industryDetail || '',
-      companySize: profileData.companySize || '51-200',
-      businessType: profileData.businessType || '',
-      organizationCulture: profileData.organizationCulture || [],
-      dailyTasks: profileData.dailyTasks || [],
-      mainChallenges: profileData.mainChallenges || [],
-      goals: profileData.goals || [],
-      personalValues: profileData.personalValues || [],
-      companyPersonalMatch: calculatedMatch,
-      preferredCoach: profileData.preferredCoach || selectedCoach,
-      profileCompleteness: profileData.profileCompleteness || 0,
-      joinDate: profileData.joinDate || '',
-      jobDescription: profileData.jobDescription || '',
-      industrySelectionMethod: profileData.industrySelectionMethod || 'classification',
-      customOrganizationCulture: profileData.customOrganizationCulture || [],
-      selectedJobCategories: profileData.selectedJobCategories || [],
-      jobCategoryDetails: profileData.jobCategoryDetails || {},
-      customJobCategories: profileData.customJobCategories || [],
-      customPersonalValues: profileData.customPersonalValues || [],
-      interviewCompletedAt: profileData.interviewCompletedAt,
-      interviewInsights: profileData.interviewInsights,
-      interviewAnswers: profileData.interviewAnswers,
-      createdAt: medicalRecord.userProfile?.createdAt || new Date(),
-      updatedAt: new Date()
-    };
-    
-    const updatedRecord = {
-      ...medicalRecord,
-      userProfile: newProfile
-    };
-    
-    setMedicalRecord(updatedRecord);
-    saveMedicalRecord(updatedRecord);
-    console.log('✅ 拡張プロフィール保存完了:', newProfile);
-  };
-
-  // AIヒアリング完了処理
-  const handleInterviewComplete = (insights: string[], answers: any[]) => {
-    if (!medicalRecord.userProfile) return;
-    
-    const updatedProfile = {
-      ...medicalRecord.userProfile,
-      interviewInsights: insights,
-      interviewAnswers: answers,
-      interviewCompletedAt: new Date(),
-      profileCompleteness: Math.min(100, (medicalRecord.userProfile.profileCompleteness || 0) + (answers.length * 2))
-    };
-    
-    const updatedRecord = {
-      ...medicalRecord,
-      userProfile: updatedProfile
-    };
-    
-    setMedicalRecord(updatedRecord);
-    saveMedicalRecord(updatedRecord);
-    setShowInterview(false);
-    
-    console.log('✅ AIヒアリング結果統合完了:', insights.length, 'insights,', answers.length, 'answers');
-  };
-
-  // OpenAI API呼び出し関数
-  const getAIResponseParallel = async (messages: Message[], coachId: CoachId) => {
-    try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: messages,
-          mode: coachId,
-          userProfile: medicalRecord.userProfile,
-          industryInsights: medicalRecord.userProfile ? industryMaster[medicalRecord.userProfile.industry]?.insights : null,
-          selectedProjects: selectedProjects,
-          sessionId: sessionId
-        }),
-      });
-      
-      if (response.status === 429) {
-        const errorData = await response.json();
-        
-        if (errorData.rateLimitExceeded) {
-          const resetHeader = response.headers.get('X-RateLimit-Reset');
-          const resetTime = resetHeader ? parseInt(resetHeader) * 1000 : Date.now() + 10 * 60 * 1000;
-          
-          setIsRateLimited(true);
-          setRateLimitResetTime(resetTime);
-          setErrorMessage('');
-          
-          throw new Error('RATE_LIMIT_EXCEEDED');
-        } else {
-          throw new Error('AI_SERVICE_BUSY');
-        }
-      }
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const aiContent = data.content || data.choices?.[0]?.message?.content;
-      
-      return aiContent;
-    } catch (error: any) {
-      console.error('💥 Error calling OpenAI API:', error);
-      throw error;
-    }
-  };
-
-  // セッション記録関数
-  const startSession = () => {
-    setCurrentSessionStart(new Date());
-    setErrorMessage('');
-  };
-
-  const calculateFavoriteCoach = (sessions: SessionRecord[]): CoachId => {
-    if (sessions.length === 0) return 'tanaka';
-    
-    const coachCounts = sessions.reduce((acc, session) => {
-      acc[session.coachId] = (acc[session.coachId] || 0) + 1;
-      return acc;
-    }, {} as Record<CoachId, number>);
-    
-    return Object.entries(coachCounts).reduce((a, b) => 
-      coachCounts[a[0] as CoachId] > coachCounts[b[0] as CoachId] ? a : b
-    )[0] as CoachId;
-  };
-
-  // 初回メッセージ表示関数
-  const showInitialMessage = () => {
-    if (hasInitialMessage) return;
-    
-    const initialMessage: Message = {
-      role: 'assistant',
-      content: presetCoaches[selectedCoach].initialMessage,
-      timestamp: new Date()
-    };
-    
-    setConversation([initialMessage]);
-    setHasInitialMessage(true);
-    
-    if (!currentSessionStart) {
-      startSession();
-    }
-  };
-
-  // セッション更新関数
-  const updateCurrentSession = (messageCount: number, topics: string[]) => {
-    if (!currentSessionStart) return;
-    
-    const currentTime = new Date();
-    const duration = Math.round((currentTime.getTime() - currentSessionStart.getTime()) / (1000 * 60));
-    
-    const updatedSession: SessionRecord = {
-      id: currentSessionStart.getTime().toString(),
-      date: currentSessionStart,
-      coachId: selectedCoach,
-      duration: Math.max(1, duration),
-      messageCount,
-      topics,
-      summary: `${presetCoaches[selectedCoach].name}とのセッション（${messageCount}メッセージ）`,
-      satisfaction: 0,
-      nextActions: []
-    };
-    
-    setMedicalRecord(prev => {
-      const existingIndex = prev.sessions.findIndex(s => s.id === updatedSession.id);
-      let newSessions;
-      
-      if (existingIndex >= 0) {
-        newSessions = [...prev.sessions];
-        newSessions[existingIndex] = updatedSession;
-      } else {
-        newSessions = [...prev.sessions, updatedSession];
-      }
-      
-      const newRecord = {
-        ...prev,
-        sessions: newSessions,
-        totalSessions: newSessions.length,
-        favoriteCoach: calculateFavoriteCoach(newSessions)
-      };
-      
-      saveMedicalRecord(newRecord);
-      return newRecord;
-    });
-  };
-
-  // 会話処理関数
-  const processConversation = async (newMessage: Message) => {
-    if (isRateLimited) return;
-    
-    if (!currentSessionStart) {
-      startSession();
-    }
-    
-    try {
-      setIsLoading(true);
-      setErrorMessage('');
-      
-      const updatedConversation = [...conversation, newMessage];
-      setConversation(updatedConversation);
-      
-      const aiResponse = await getAIResponseParallel(updatedConversation, selectedCoach);
-      
-      if (aiResponse && aiResponse.trim()) {
-        const assistantMessage: Message = {
-          role: 'assistant',
-          content: aiResponse,
-          timestamp: new Date(),
-        };
-        
-        setConversation(prev => {
-          const newConv = [...prev, assistantMessage];
-          
-          if (currentSessionStart) {
-            const messageCount = newConv.length;
-            const topics = newConv
-              .filter(msg => msg.role === 'user')
-              .map(msg => msg.content.substring(0, 50))
-              .slice(-3);
-            
-            updateCurrentSession(messageCount, topics);
-          }
-          
-          return newConv;
-        });
-        
-        // プロジェクトカルテのAI自動更新
-        if (selectedProjects.length > 0) {
-          selectedProjects.forEach(async (projectId) => {
-            await fetch(`/api/projects/${projectId}/ai-update`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                conversation: updatedConversation.map(msg => ({
-                  role: msg.role,
-                  content: msg.content
-                })),
-                sessionId: sessionId
-              })
-            });
-          });
-        }
-      } else {
-        setErrorMessage('すみません、もう一度お話しいただけますか？');
-      }
-    } catch (error: any) {
-      if (error.message === 'RATE_LIMIT_EXCEEDED') {
-        // 既に処理済み
-      } else if (error.message === 'AI_SERVICE_BUSY') {
-        setErrorMessage('AIサービスが混雑しています。少し時間をおいて再度お試しください。');
-      } else {
-        setErrorMessage('すみません、もう一度お話しいただけますか？');
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // 音声認識機能
-  const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
-    try {
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'recording.webm');
-
-      const response = await fetch('/api/chat/transcribe', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (response.status === 429) {
-        const errorData = await response.json();
-        
-        if (errorData.rateLimitExceeded) {
-          const resetHeader = response.headers.get('X-RateLimit-Reset');
-          const resetTime = resetHeader ? parseInt(resetHeader) * 1000 : Date.now() + 10 * 60 * 1000;
-          
-          setIsRateLimited(true);
-          setRateLimitResetTime(resetTime);
-          setErrorMessage('');
-          
-          return 'RATE_LIMIT_EXCEEDED';
-        } else {
-          return '音声認識サービスが混雑しています。少し時間をおいて再度お試しください。';
-        }
-      }
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      return data.text || 'テキストを認識できませんでした。';
-    } catch (error) {
-      console.error('音声認識エラー:', error);
-      return 'テキストを認識できませんでした。';
-    }
-  };
-
-  // 録音機能
-  const startRecording = async () => {
-    if (isRateLimited) return;
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
-      };
-
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const transcribedText = await transcribeAudio(audioBlob);
-        
-        if (transcribedText === 'RATE_LIMIT_EXCEEDED') {
-          // 既に処理済み
-        } else if (transcribedText && transcribedText !== 'テキストを認識できませんでした。') {
-          const newMessage: Message = {
-            role: 'user',
-            content: transcribedText,
-            timestamp: new Date(),
-          };
-          await processConversation(newMessage);
-        } else {
-          setErrorMessage('音声を認識できませんでした。もう一度お試しください。');
-        }
-
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-    } catch (error) {
-      console.error('録音開始エラー:', error);
-      setErrorMessage('マイクへのアクセスが許可されていません。');
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
-  };
-
-  // メッセージ送信
-  const sendTextMessage = async () => {
-    if (!textInput.trim() && !attachedFile) return;
-    if (isRateLimited) return;
-
-    const newMessage: Message = {
-      role: 'user',
-      content: textInput.trim(),
-      timestamp: new Date(),
-      attachment: attachedFile || undefined,
-    };
-
-    setTextInput('');
-    setAttachedFile(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-
-    await processConversation(newMessage);
-  };
-
-  // ファイル添付
-  const handleFileAttachment = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      setAttachedFile(file);
-    }
-  };
-
-  // メッセージ編集
-  const startEditingMessage = (index: number) => {
-    setEditingMessageIndex(index);
-    setEditingContent(conversation[index].content);
-  };
-
-  const saveEditedMessage = () => {
-    if (editingMessageIndex !== null) {
-      const updatedConversation = [...conversation];
-      updatedConversation[editingMessageIndex].content = editingContent;
-      setConversation(updatedConversation);
-      setEditingMessageIndex(null);
-      setEditingContent('');
-    }
-  };
-
-  const cancelEditing = () => {
-    setEditingMessageIndex(null);
-    setEditingContent('');
-  };
-
-  // 初回メッセージの表示（セッション画面でのみ）
-  useEffect(() => {
-    if (currentPage === 'session' && !hasInitialMessage && conversation.length === 0) {
-      showInitialMessage();
-    }
-  }, [selectedCoach, hasInitialMessage, conversation.length, currentPage]);
-
-  // プロジェクト削除
-  const handleDeleteProject = async (projectId: string) => {
-    if (!confirm('このプロジェクトを削除してもよろしいですか？')) return;
-    
-    try {
-      const response = await fetch(`/api/projects/${projectId}`, {
-        method: 'DELETE',
-        headers: {
-          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
-        }
-      });
-      
-      if (response.ok) {
-        fetchProjects();
-      }
-    } catch (error) {
-      console.error('プロジェクト削除エラー:', error);
-    }
-  };
-
-  return (
-    <div 
-      className="min-h-screen flex flex-col"
-      style={{ 
-        background: 'linear-gradient(135deg, #FDFEF0 0%, #F8F6F0 25%, #F0EBE5 50%, #E8DFD8 75%, #CCBEB8 100%)'
-      }}
-      suppressHydrationWarning={true}
-    >
-      {currentPage === 'home' ? (
-        // 🎨 トップページ
-        <>
-          {/* 固定ヘッダー */}
-          <header className="fixed top-0 left-0 right-0 bg-white bg-opacity-90 backdrop-blur-md shadow-sm border-b z-50">
-            <div className="max-w-7xl mx-auto px-4 py-4">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center space-x-4">
-                  {/* ロゴ */}
-                  <img 
-                    src="/logo-buddyai-for-biz.png" 
-                    alt="Buddy AI for Biz" 
-                    className="h-16 w-auto"
-                    onError={(e) => {
-                      const target = e.target as HTMLImageElement;
-                      target.style.display = 'none';
-                      const fallback = target.nextElementSibling as HTMLElement;
-                      if (fallback) fallback.classList.remove('hidden');
-                    }}
-                  />
-                  {/* ロゴ読み込み失敗時のフォールバック */}
-                  <div className="hidden flex items-center space-x-3">
-                    <div className="w-12 h-12 bg-gradient-to-r from-orange-400 to-pink-500 rounded-xl flex items-center justify-center">
-                      <span className="text-2xl">🤖</span>
-                    </div>
-                    <div>
-                      <h1 className="text-2xl font-bold text-gray-800">Buddy AI for Biz</h1>
-                      <p className="text-gray-600 text-sm">Your AI Business Coach</p>
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="flex items-center space-x-4">
-                  {medicalRecord.userProfile && (
-                    <div className="text-right text-gray-800">
-                      <div className="font-semibold">{medicalRecord.userProfile.name}さん</div>
-                      <div className="text-sm text-gray-600">
-                        {medicalRecord.userProfile.company} | {industryMaster[medicalRecord.userProfile.industry]?.label}
-                      </div>
-                      {/* プロフィール完成度表示 */}
-                      <div className="flex items-center space-x-2 mt-1">
-                        <div className="w-16 bg-gray-200 rounded-full h-1.5">
-                          <div 
-                            className="bg-gradient-to-r from-blue-500 to-green-500 h-1.5 rounded-full transition-all"
-                            style={{ width: `${medicalRecord.userProfile.profileCompleteness || 0}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-xs text-gray-500">{medicalRecord.userProfile.profileCompleteness || 0}%</span>
-                      </div>
-                    </div>
-                  )}
-                  <button
-                    onClick={() => setShowProfile(true)}
-                    className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
-                  >
-                    🏢 ベースカルテ
-                  </button>
-                  <button
-                    onClick={() => setCurrentPage('projects')}
-                    className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
-                  >
-                    📁 プロジェクトカルテ
-                  </button>
-                  {/* AIヒアリングボタン */}
-                  {medicalRecord.userProfile && (medicalRecord.userProfile.profileCompleteness || 0) >= 60 && (
-                    <button
-                      onClick={() => setShowInterview(true)}
-                      className={`px-4 py-2 rounded-lg transition-all border shadow-sm ${
-                        medicalRecord.userProfile.interviewCompletedAt
-                          ? 'bg-green-100 text-green-700 border-green-200'
-                          : 'bg-orange-100 text-orange-700 border-orange-200 animate-pulse'
-                      }`}
-                    >
-                      🎤 {medicalRecord.userProfile.interviewCompletedAt ? 'ヒアリング済み' : 'AIヒアリング'}
-                    </button>
-                  )}
-                  <button
-                    onClick={() => setShowMedicalRecord(true)}
-                    className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
-                  >
-                    📋 マイページ
-                  </button>
-                </div>
-              </div>
-            </div>
-          </header>
-
-          {/* メインコンテンツ */}
-          <div className="pt-20">
-            {/* GIFアニメーション表示エリア */}
-            <div className="w-full pb-8 bg-white bg-opacity-30">
-              <img 
-                src="/hero-animation.gif" 
-                alt="Hero Animation" 
-                className="w-[90%] h-auto mx-auto shadow-lg"
-                onError={(e) => {
-                  const target = e.target as HTMLImageElement;
-                  target.style.display = 'none';
-                  const fallback = target.nextElementSibling as HTMLElement;
-                  if (fallback) fallback.classList.remove('hidden');
-                }}
-              />
-              {/* GIF読み込み失敗時のフォールバック */}
-              <div className="hidden">
-                <div className="w-[90%] h-64 bg-gradient-to-r from-orange-400 via-pink-500 to-purple-600 flex items-center justify-center mx-auto">
-                  <span className="text-white text-2xl font-bold">🚀 AI Powered Business Coaching</span>
-                </div>
-              </div>
-            </div>
-
-            {/* メインヒーローコンテンツ */}
-            <div className="relative min-h-screen overflow-hidden">
-              <div className="relative z-10 max-w-7xl mx-auto px-4 py-20">
-                <div className="text-center">
-                  <div className="inline-flex items-center bg-white bg-opacity-70 backdrop-blur-sm rounded-full px-6 py-2 text-gray-800 text-sm font-medium mb-8 border border-gray-200 shadow-sm">
-                    <span className="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
-                    AI-Powered Business Coaching
-                  </div>
-                  
-                  <h1 className="text-5xl md:text-7xl font-bold text-gray-900 mb-8 leading-tight">
-                    あなた専属の
-                    <span 
-                      className="block"
-                      style={{
-                        background: 'linear-gradient(90deg, #DB0A3C 0%, #643498 100%)',
-                        WebkitBackgroundClip: 'text',
-                        WebkitTextFillColor: 'transparent',
-                        backgroundClip: 'text'
-                      }}
-                    >
-                      AIコーチ陣
-                    </span>
-                    がビジネスを変革
-                  </h1>
-                  
-                  <p className="text-xl text-gray-700 mb-12 max-w-3xl mx-auto leading-relaxed">
-                    専門AIコーチが、あなたのビジネス課題を解決。戦略からメンタルケアまで、
-                    <br />包括的なサポートで成果を最大化させます。
-                  </p>
-
-                  <div className="flex flex-col items-center space-y-8">
-                    <button
-                      onClick={() => setShowProjectSelectionModal(true)}
-                      className="group relative px-8 py-4 text-white text-lg font-semibold rounded-2xl transition-all transform hover:scale-105 shadow-xl"
-                      style={{
-                        background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
-                      }}
-                    >
-                      <span className="relative z-10">🚀 今すぐ無料で始める</span>
-                    </button>
-                    
-                    <div className="flex space-x-8 text-gray-800">
-                      <div className="text-center">
-                        <div className="text-3xl font-bold text-orange-500">{medicalRecord.totalSessions}</div>
-                        <div className="text-sm text-gray-600">総セッション数</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-3xl font-bold text-pink-500">
-                          {Math.round(medicalRecord.sessions.reduce((acc, s) => acc + s.duration, 0) / Math.max(1, medicalRecord.sessions.length)) || 0}分
-                        </div>
-                        <div className="text-sm text-gray-600">平均セッション時間</div>
-                      </div>
-                      <div className="text-center">
-                        <div className="text-3xl font-bold text-purple-500">4</div>
-                        <div className="text-sm text-gray-600">コーチオプション</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* コーチ紹介セクション */}
-            <div className="bg-white bg-opacity-60 backdrop-blur-sm py-20">
-              <div className="max-w-7xl mx-auto px-4">
-                <div className="text-center mb-16">
-                  <h2 className="text-4xl font-bold text-gray-900 mb-4">あなた専属のAIコーチ陣</h2>
-                  <p className="text-xl text-gray-600 max-w-3xl mx-auto">
-                    専門分野を持つAIコーチから選択、またはオリジナルコーチを作成できます
-                  </p>
-                  
-                  {/* プロフィール完成度による案内 */}
-                  {medicalRecord.userProfile && (medicalRecord.userProfile.profileCompleteness || 0) < 60 && (
-                    <div className="mt-6 max-w-2xl mx-auto bg-gradient-to-r from-orange-50 to-yellow-50 border border-orange-200 rounded-xl p-4">
-                      <div className="flex items-center justify-center space-x-3">
-                        <span className="text-2xl">⚡</span>
-                        <div>
-                          <p className="text-orange-800 font-semibold">より良いコーチングのために</p>
-                          <p className="text-orange-700 text-sm">ベースカルテを詳しく設定すると、あなたに最適化されたアドバイスが受けられます</p>
-                        </div>
-                        <button
-                          onClick={() => setShowProfile(true)}
-                          className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-sm font-semibold"
-                        >
-                          設定する
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  
-                  {/* AIヒアリング案内 */}
-                  {medicalRecord.userProfile && 
-                   (medicalRecord.userProfile.profileCompleteness || 0) >= 60 && 
-                   !medicalRecord.userProfile.interviewCompletedAt && (
-                    <div className="mt-6 max-w-2xl mx-auto bg-gradient-to-r from-blue-50 to-purple-50 border border-blue-200 rounded-xl p-4">
-                      <div className="flex items-center justify-center space-x-3">
-                        <span className="text-2xl">🎤</span>
-                        <div>
-                          <p className="text-blue-800 font-semibold">AIヒアリングで更なる最適化</p>
-                          <p className="text-blue-700 text-sm">数問の追加質問で、より深いインサイトとパーソナライズドコーチングを実現</p>
-                        </div>
-                        <button
-                          onClick={() => setShowInterview(true)}
-                          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-semibold"
-                        >
-                          開始する
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="overflow-x-auto pb-6">
-                  <div className="flex space-x-6 min-w-max px-4">
-                    {Object.entries(presetCoaches).map(([key, coach]) => (
-                      <div
-                        key={key}
-                        className={`group relative bg-gradient-to-br from-white to-gray-50 rounded-3xl p-8 shadow-lg hover:shadow-2xl transition-all duration-500 transform hover:-translate-y-2 cursor-pointer border-2 w-80 flex-shrink-0 ${
-                          selectedCoachForSession === key 
-                            ? 'border-orange-400 ring-4 ring-orange-100 shadow-2xl' 
-                            : 'border-gray-200 hover:border-gray-300'
-                        }`}
-                        onClick={() => setSelectedCoachForSession(key as CoachId)}
-                      >
-                        <div className={`absolute inset-0 bg-gradient-to-br ${coach.color} opacity-5 rounded-3xl`}></div>
-                        
-                        <div className="relative z-10 text-center">
-                          <div className={`w-20 h-20 mx-auto mb-6 bg-gradient-to-br ${coach.color} rounded-2xl flex items-center justify-center transform group-hover:scale-110 transition-transform duration-300 shadow-lg`}>
-                            <span className="text-3xl">{coach.avatar}</span>
-                          </div>
-                          
-                          <h3 className="text-xl font-bold text-gray-900 mb-2">{coach.name}</h3>
-                          <p className="text-sm font-semibold text-gray-600 mb-4">{coach.title}</p>
-                          
-                          <div className="text-xs text-gray-500 mb-4 leading-relaxed">
-                            {coach.specialty}
-                          </div>
-                          
-                          <p className="text-sm text-gray-700 leading-relaxed">
-                            {coach.description}
-                          </p>
-                          
-                          {selectedCoachForSession === key && (
-                            <div className="absolute -top-2 -right-2 w-6 h-6 bg-orange-500 rounded-full flex items-center justify-center animate-pulse">
-                              <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20">
-                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                              </svg>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-
-                    {/* カスタムコーチカード */}
-                    <div className="group relative bg-gradient-to-br from-gray-50 to-gray-100 rounded-3xl p-8 shadow-lg hover:shadow-2xl transition-all duration-500 transform hover:-translate-y-2 cursor-pointer border-2 border-dashed border-gray-300 hover:border-orange-400 w-80 flex-shrink-0">
-                      <div className="absolute -top-3 -right-3 bg-gradient-to-r from-yellow-400 to-orange-500 text-white text-xs font-bold px-3 py-1 rounded-full shadow-lg animate-pulse">
-                        PREMIUM
-                      </div>
-                      
-                      <div className="text-center">
-                        <div className="w-20 h-20 mx-auto mb-6 bg-gradient-to-br from-gray-300 to-gray-400 rounded-2xl flex items-center justify-center transform group-hover:scale-110 transition-transform duration-300 shadow-lg relative overflow-hidden">
-                          <span className="text-3xl">⚙️</span>
-                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent transform -skew-x-12 -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
-                        </div>
-                        
-                        <h3 className="text-xl font-bold text-gray-900 mb-2">カスタムコーチ</h3>
-                        <p className="text-sm font-semibold text-orange-600 mb-4">オリジナル作成</p>
-                        
-                        <div className="text-xs text-gray-500 mb-4 leading-relaxed space-y-1">
-                          <div>✨ 完全カスタマイズ可能</div>
-                          <div>🎯 専門分野を自由設定</div>
-                          <div>🗣️ 話し方・性格を調整</div>
-                          <div>📚 独自知識ベース対応</div>
-                        </div>
-                        
-                        <button className="w-full mt-4 px-4 py-2 bg-gradient-to-r from-orange-500 to-pink-500 text-white text-sm font-semibold rounded-xl hover:from-orange-600 hover:to-pink-600 transition-all transform hover:scale-105 shadow-md">
-                          🚀 プレミアムにアップグレード
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="text-center mt-12">
-                  <button
-                    onClick={() => {
-                      setSelectedCoach(selectedCoachForSession);
-                      setShowProjectSelectionModal(true);
-                    }}
-                    className="group relative px-10 py-4 text-white text-lg font-semibold rounded-2xl hover:shadow-xl transition-all transform hover:scale-105"
-                    style={{
-                      background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
-                    }}
-                  >
-                    <span className="relative z-10">
-                      🚀 {presetCoaches[selectedCoachForSession].name}とセッション開始
-                    </span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* ダッシュボード */}
-            <div className="bg-gradient-to-br from-gray-50 to-white py-20">
-              <div className="max-w-7xl mx-auto px-4">
-                <div className="text-center mb-16">
-                  <h2 className="text-4xl font-bold text-gray-900 mb-4">あなたの成長データ</h2>
-                  <p className="text-xl text-gray-600">AIコーチングの効果を数値で確認できます</p>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-12">
-                  <div className="bg-gradient-to-br from-orange-50 to-orange-100 rounded-3xl p-8 text-center transform hover:scale-105 transition-transform shadow-lg">
-                    <div className="w-16 h-16 bg-orange-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                      <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                      </svg>
-                    </div>
-                    <div className="text-4xl font-bold text-orange-600 mb-2">{medicalRecord.totalSessions}</div>
-                    <div className="text-orange-800 font-semibold">総セッション数</div>
-                  </div>
-
-                  <div className="bg-gradient-to-br from-pink-50 to-pink-100 rounded-3xl p-8 text-center transform hover:scale-105 transition-transform shadow-lg">
-                    <div className="w-16 h-16 bg-pink-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                      <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                      </svg>
-                    </div>
-                    <div className="text-4xl font-bold text-pink-600 mb-2">
-                      {medicalRecord.favoriteCoach ? presetCoaches[medicalRecord.favoriteCoach].name.split(' ')[0] : '未設定'}
-                    </div>
-                    <div className="text-pink-800 font-semibold">お気に入りコーチ</div>
-                  </div>
-
-                  <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-3xl p-8 text-center transform hover:scale-105 transition-transform shadow-lg">
-                    <div className="w-16 h-16 bg-purple-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                      <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                    </div>
-                    <div className="text-4xl font-bold text-purple-600 mb-2">
-                      {Math.round(medicalRecord.sessions.reduce((acc, s) => acc + s.duration, 0) / Math.max(1, medicalRecord.sessions.length)) || 0}分
-                    </div>
-                    <div className="text-purple-800 font-semibold">平均セッション時間</div>
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-3xl p-8 shadow-lg">
-                  <div className="flex justify-between items-center mb-8">
-                    <h3 className="text-2xl font-bold text-gray-900">🕒 最近のセッション</h3>
-                    <button
-                      onClick={() => setShowMedicalRecord(true)}
-                      className="px-6 py-3 text-white rounded-xl transition-colors font-semibold shadow-md"
-                      style={{
-                        background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
-                      }}
-                    >
-                      すべて見る
-                    </button>
-                  </div>
-                  
-                  {medicalRecord.sessions.length === 0 ? (
-                    <div className="text-center py-12">
-                      <div className="w-20 h-20 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <svg className="w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                        </svg>
-                      </div>
-                      <p className="text-gray-500 text-lg">まだセッション履歴がありません</p>
-                      <p className="text-gray-400 text-sm mt-2">最初のAIコーチングセッションを始めましょう！</p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                      {medicalRecord.sessions.slice().reverse().slice(0, 6).map((session) => (
-                        <div key={session.id} className="bg-gradient-to-br from-gray-50 to-white rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow border border-gray-100">
-                          <div className="flex items-center space-x-3 mb-4">
-                            <div className={`w-10 h-10 ${presetCoaches[session.coachId].color} rounded-xl flex items-center justify-center`}>
-                              <span className="text-lg">{presetCoaches[session.coachId].avatar}</span>
-                            </div>
-                            <div>
-                              <div className="font-semibold text-gray-900">{presetCoaches[session.coachId].name}</div>
-                              <div className="text-sm text-gray-500">
-                                {session.date.toLocaleDateString('ja-JP')}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex justify-between text-sm text-gray-600">
-                            <span>{session.duration}分</span>
-                            <span>{session.messageCount}メッセージ</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* フッターCTA */}
-            <div 
-              className="py-20"
-              style={{
-                background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
-              }}
-            >
-              <div className="max-w-4xl mx-auto text-center px-4">
-                <h2 className="text-4xl font-bold text-white mb-4">
-                  今すぐAIコーチングを体験
-                </h2>
-                <p className="text-xl text-pink-100 mb-8">
-                  あなたのビジネス課題を、専門AIコーチと一緒に解決しませんか？
-                </p>
-                <button
-                  onClick={() => {
-                    setSelectedCoach(selectedCoachForSession);
-                    setShowProjectSelectionModal(true);
-                  }}
-                  className="px-10 py-4 bg-white text-pink-600 text-lg font-bold rounded-2xl hover:bg-gray-100 transition-all transform hover:scale-105 shadow-xl"
-                >
-                  🚀 {presetCoaches[selectedCoachForSession].name}とセッション開始
-                </button>
-              </div>
-            </div>
-          </div>
-        </>
-      ) : currentPage === 'projects' ? (
-        // プロジェクトカルテ一覧画面
-        <>
-          <header className="bg-white shadow-sm border-b">
-            <div className="max-w-7xl mx-auto px-4 py-4">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center space-x-4">
-                  <button
-                    onClick={() => setCurrentPage('home')}
-                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
-                  >
-                    ← ホームに戻る
-                  </button>
-                  <h1 className="text-2xl font-bold text-gray-800">📁 プロジェクトカルテ管理</h1>
-                </div>
-                <button
-                  onClick={() => {
-                    setEditingProject(null);
-                    setShowProjectModal(true);
-                  }}
-                  className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-semibold"
-                >
-                  ＋ 新規プロジェクト作成
-                </button>
-              </div>
-            </div>
-          </header>
-
-          <div className="max-w-7xl mx-auto px-4 py-8">
-            <ProjectList 
-              projects={projects}
-              onEdit={(project) => {
-                setEditingProject(project);
-                setShowProjectModal(true);
-              }}
-              onDelete={handleDeleteProject}
-              onStartSession={(projectId) => {
-                handleStartSession([projectId], 'existing');
-              }}
-            />
-          </div>
-        </>
-      ) : (
-        // セッション画面
-        <>
-          <header className="bg-white shadow-sm border-b">
-            <div className="max-w-4xl mx-auto px-4 py-4">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center space-x-4">
-                  <button
-                    onClick={() => setCurrentPage('home')}
-                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
-                  >
-                    ← ホームに戻る
-                  </button>
-                  <div>
-                    <h1 className="text-xl font-bold text-gray-800">
-                      {presetCoaches[selectedCoach].avatar} {presetCoaches[selectedCoach].name}
-                    </h1>
-                    <p className="text-gray-600 text-sm">{presetCoaches[selectedCoach].title}</p>
-                  </div>
-                </div>
-                <div className="flex space-x-2">
-                  {selectedProjects.length > 0 && (
-                    <div className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm">
-                      📁 {selectedProjects.length}個のプロジェクト選択中
-                    </div>
-                  )}
-                  <button
-                    onClick={() => setShowProfile(true)}
-                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
-                  >
-                    🏢 ベースカルテ
-                  </button>
-                  <button
-                    onClick={() => setShowMedicalRecord(true)}
-                    className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"
-                  >
-                    📋 マイページ
-                  </button>
-                </div>
-              </div>
-            </div>
-          </header>
-
-          <div className="flex-1 max-w-4xl mx-auto w-full px-4 py-6 overflow-y-auto">
-            {isRateLimited && (
-              <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-                <div className="flex items-center space-x-2 text-yellow-800">
-                  <span className="text-2xl">⏰</span>
-                  <div>
-                    <div className="font-semibold">利用制限に達しました</div>
-                    <div className="text-sm">
-                      {rateLimitCountdown !== null ? (
-                        <>あと {Math.floor(rateLimitCountdown / 60)}分{rateLimitCountdown % 60}秒で利用可能になります</>
-                      ) : (
-                        '10分後に再度お試しください'
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div className="space-y-4">
-              {conversation.map((message, index) => (
-                <div
-                  key={index}
-                  className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg relative group ${
-                      message.role === 'user'
-                        ? 'bg-blue-500 text-white'
-                        : 'bg-white text-gray-800 shadow-sm border'
-                    }`}
-                  >
-                    {editingMessageIndex === index ? (
-                      <div className="space-y-2">
-                        <textarea
-                          value={editingContent}
-                          onChange={(e) => setEditingContent(e.target.value)}
-                          className="w-full p-2 border rounded text-[#0E2841]"
-                          rows={3}
-                        />
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={saveEditedMessage}
-                            className="px-3 py-1 bg-blue-500 text-white rounded text-sm"
-                          >
-                            保存
-                          </button>
-                          <button
-                            onClick={cancelEditing}
-                            className="px-3 py-1 bg-gray-500 text-white rounded text-sm"
-                          >
-                            キャンセル
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="whitespace-pre-wrap">{message.content}</div>
-                        {message.attachment && (
-                          <div className="text-xs mt-2 opacity-75">
-                            📎 {message.attachment.name}
-                          </div>
-                        )}
-                        {message.role === 'user' && (
-                          <button
-                            onClick={() => startEditingMessage(index)}
-                            className="absolute top-0 right-0 -mt-2 -mr-2 bg-gray-600 text-white rounded-full w-6 h-6 text-xs opacity-0 group-hover:opacity-100 transition-opacity"
-                          >
-                            ✏️
-                          </button>
-                        )}
-                      </>
-                    )}
-                    <div className="text-xs opacity-75 mt-1">
-                      {message.timestamp.toLocaleTimeString()}
-                    </div>
-                  </div>
-                </div>
-              ))}
-
-              {isLoading && (
-                <div className="flex justify-start">
-                  <div className="bg-white text-gray-800 shadow-sm border px-4 py-2 rounded-lg">
-                    <div className="flex items-center space-x-2">
-                      <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full"></div>
-                      <span>考え中...</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {errorMessage && !isRateLimited && (
-                <div className="text-center text-red-500 text-sm">{errorMessage}</div>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white border-t">
-            <div className="max-w-4xl mx-auto px-4 py-4">
-              <div className="flex items-end space-x-2">
-                <div className="flex-1">
-                  <div className="flex items-center space-x-2 mb-2">
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      onChange={handleFileAttachment}
-                      className="hidden"
-                      accept=".txt,.pdf,.doc,.docx,.xls,.xlsx"
-                    />
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isRateLimited}
-                      className={`p-2 transition-colors ${
-                        isRateLimited 
-                          ? 'text-gray-300 cursor-not-allowed' 
-                          : 'text-gray-500 hover:text-gray-700'
-                      }`}
-                      title="ファイル添付"
-                    >
-                      📎
-                    </button>
-                    {attachedFile && (
-                      <span className="text-sm text-gray-600">
-                        {attachedFile.name}
-                        <button
-                          onClick={() => setAttachedFile(null)}
-                          disabled={isRateLimited}
-                          className={`ml-2 ${
-                            isRateLimited 
-                              ? 'text-gray-300 cursor-not-allowed' 
-                              : 'text-red-500 hover:text-red-700'
-                          }`}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    )}
-                  </div>
-                  <textarea
-                    value={textInput}
-                    onChange={(e) => setTextInput(e.target.value)}
-                    onKeyPress={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey && !isRateLimited) {
-                        e.preventDefault();
-                        sendTextMessage();
-                      }
-                    }}
-                    placeholder={isRateLimited ? "利用制限中です..." : "メッセージを入力してください..."}
-                    className={`w-full p-3 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 text-[#0E2841] ${
-                      isRateLimited ? 'bg-gray-100 cursor-not-allowed' : ''
-                    }`}
-                    rows={3}
-                    disabled={isLoading || isRateLimited}
-                  />
-                </div>
-                <div className="flex flex-col space-y-2">
-                  <button
-                    onClick={sendTextMessage}
-                    disabled={isLoading || (!textInput.trim() && !attachedFile) || isRateLimited}
-                    className={`px-6 py-3 rounded-lg transition-colors ${
-                      isRateLimited
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                        : 'bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed'
-                    }`}
-                  >
-                    送信
-                  </button>
-                  <button
-                    onClick={isRecording ? stopRecording : startRecording}
-                    disabled={isLoading || isRateLimited}
-                    className={`px-6 py-3 rounded-lg transition-colors ${
-                      isRateLimited
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                        : isRecording
-                        ? 'bg-red-500 hover:bg-red-600 text-white'
-                        : 'bg-gray-500 hover:bg-gray-600 text-white'
-                    }`}
-                  >
-                    {isRecording ? '🔴 停止' : '🎤 録音'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* プロジェクト選択モーダル */}
-      <ProjectSelectionModal
-        isOpen={showProjectSelectionModal}
-        onClose={() => setShowProjectSelectionModal(false)}
-        projects={projects}
-        onStartSession={handleStartSession}
-      />
-
-      {/* プロジェクト作成/編集モーダル */}
-      <ProjectModal
-        isOpen={showProjectModal}
-        onClose={() => {
-          setShowProjectModal(false);
-          setEditingProject(null);
-        }}
-        project={editingProject}
-        onSave={() => {
-          fetchProjects();
-          setShowProjectModal(false);
-          setEditingProject(null);
-        }}
-      />
-
-      {/* 拡張プロフィールモーダル */}
-      <EnhancedProfileModal
-        isOpen={showProfile}
-        onClose={() => setShowProfile(false)}
-        currentProfile={medicalRecord.userProfile}
-        onSave={saveUserProfile}
-      />
-
-      {/* AIヒアリングモーダル */}
-      {medicalRecord.userProfile && (
-        <AIInterviewModal
-          isOpen={showInterview}
-          onClose={() => setShowInterview(false)}
-          userProfile={medicalRecord.userProfile}
-          onComplete={handleInterviewComplete}
-        />
-      )}
-
-      {showMedicalRecord && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-full max-w-4xl mx-4 max-h-[80vh] overflow-y-auto">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-bold">📋 あなたのマイページ</h2>
-              <button 
-                onClick={() => setShowMedicalRecord(false)}
-                className="text-gray-500 hover:text-gray-700 text-2xl"
-              >
-                ×
-              </button>
-            </div>
-            
-            {medicalRecord.userProfile && (
-              <div className="mb-6 p-4 bg-gray-50 rounded-lg">
-                <h3 className="text-lg font-semibold mb-2">🏢 ベースカルテ</h3>
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div><strong>お名前:</strong> {medicalRecord.userProfile.name}</div>
-                  <div><strong>会社:</strong> {medicalRecord.userProfile.company}</div>
-                  <div><strong>役職:</strong> {medicalRecord.userProfile.position}</div>
-                  <div><strong>部署:</strong> {medicalRecord.userProfile.department}</div>
-                  <div><strong>業界:</strong> {industryMaster[medicalRecord.userProfile.industry]?.label}</div>
-                  <div><strong>規模:</strong> {companySizeMaster[medicalRecord.userProfile.companySize]?.label}</div>
-                </div>
-                
-                {medicalRecord.userProfile.interviewCompletedAt && (
-                  <div className="mt-3 p-3 bg-blue-50 rounded-lg">
-                    <div className="flex items-center space-x-2 mb-2">
-                      <span className="text-blue-600">🎤</span>
-                      <strong className="text-blue-800">AIヒアリング完了</strong>
-                      <span className="text-xs text-blue-600">
-                        {medicalRecord.userProfile.interviewCompletedAt.toLocaleDateString('ja-JP')}
-                      </span>
-                    </div>
-                    {medicalRecord.userProfile.interviewInsights && medicalRecord.userProfile.interviewInsights.length > 0 && (
-                      <div className="text-sm text-blue-700">
-                        <strong>取得インサイト:</strong> {medicalRecord.userProfile.interviewInsights.length}項目
-                      </div>
-                    )}
-                  </div>
-                )}
-                
-                {medicalRecord.userProfile.organizationCulture && medicalRecord.userProfile.organizationCulture.length > 0 && (
-                  <div className="mt-3">
-                    <strong>組織文化:</strong>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {medicalRecord.userProfile.organizationCulture.map((culture, index) => (
-                        <span key={index} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
-                          {culture}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {medicalRecord.userProfile.personalValues && medicalRecord.userProfile.personalValues.length > 0 && (
-                  <div className="mt-3">
-                    <strong>個人の価値観:</strong>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {medicalRecord.userProfile.personalValues.map((valueId, index) => {
-                        const value = personalValuesMaster.find(v => v.id === valueId);
-                        return value ? (
-                          <span key={index} className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
-                            {value.label}
-                          </span>
-                        ) : null;
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                <div className="mt-3 flex items-center space-x-2">
-                  <strong>ベースカルテ完成度:</strong>
-                  <div className="flex-1 bg-gray-200 rounded-full h-2 max-w-32">
-                    <div 
-                      className="bg-gradient-to-r from-blue-500 to-green-500 h-2 rounded-full"
-                      style={{ width: `${medicalRecord.userProfile.profileCompleteness || 0}%` }}
-                    ></div>
-                  </div>
-                  <span className="text-sm font-bold text-blue-600">{medicalRecord.userProfile.profileCompleteness || 0}%</span>
-                </div>
-              </div>
-            )}
-            
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-              <div className="bg-blue-50 p-4 rounded-lg">
-                <div className="text-2xl font-bold text-blue-600">{medicalRecord.totalSessions}</div>
-                <div className="text-sm text-blue-800">総セッション数</div>
-              </div>
-              <div className="bg-green-50 p-4 rounded-lg">
-                <div className="text-2xl font-bold text-green-600">
-                  {medicalRecord.favoriteCoach ? presetCoaches[medicalRecord.favoriteCoach].name : '未設定'}
-                </div>
-                <div className="text-sm text-green-800">お気に入りコーチ</div>
-              </div>
-              <div className="bg-purple-50 p-4 rounded-lg">
-                <div className="text-2xl font-bold text-purple-600">
-                  {Math.round(medicalRecord.sessions.reduce((acc, s) => acc + s.duration, 0) / Math.max(1, medicalRecord.sessions.length))}分
-                </div>
-                <div className="text-sm text-purple-800">平均セッション時間</div>
-              </div>
-            </div>
-
-            <div>
-              <h3 className="text-lg font-semibold mb-4">🕒 セッション履歴</h3>
-              {medicalRecord.sessions.length === 0 ? (
-                <p className="text-gray-500 text-center py-8">まだセッション履歴がありません</p>
-              ) : (
-                <div className="space-y-3 max-h-60 overflow-y-auto">
-                  {medicalRecord.sessions.slice().reverse().map((session) => (
-                    <div key={session.id} className="border p-4 rounded-lg">
-                      <div className="flex justify-between items-start mb-2">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-2xl">{presetCoaches[session.coachId].avatar}</span>
-                          <div>
-                            <div className="font-semibold">{presetCoaches[session.coachId].name}</div>
-                            <div className="text-sm text-gray-600">
-                              {session.date.toLocaleDateString()} {session.date.toLocaleTimeString()}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="text-right text-sm text-gray-500">
-                          <div>{session.duration}分</div>
-                          <div>{session.messageCount}メッセージ</div>
-                        </div>
-                      </div>
-                      <div className="text-sm text-gray-700">{session.summary}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// プロジェクト一覧コンポーネント
-const ProjectList = ({ 
-  projects,
-  onEdit,
-  onDelete,
-  onStartSession
-}: {
-  projects: Project[];
-  onEdit: (project: Project) => void;
-  onDelete: (projectId: string) => void;
-  onStartSession: (projectId: string) => void;
-}) => {
-  if (projects.length === 0) {
-    return (
-      <div className="text-center py-12">
-        <div className="w-24 h-24 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
-          <svg className="w-12 h-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-          </svg>
-        </div>
-        <p className="text-gray-500 text-lg mb-2">プロジェクトがまだありません</p>
-        <p className="text-gray-400 text-sm">新規プロジェクトを作成して、AIコーチと継続的な相談を始めましょう</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="grid gap-4">
-      {projects.map((project) => (
-        <div key={project.id} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
-          <div className="flex justify-between items-start">
-            <div className="flex-1">
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                {project.project_name}
-              </h3>
-              <p className="text-sm text-gray-600 line-clamp-2 mb-3">
-                {project.objectives}
-              </p>
-              <div className="flex items-center space-x-4 text-xs text-gray-500">
-                <span>最終更新: {new Date(project.updated_at).toLocaleDateString('ja-JP')}</span>
-                {project.ai_auto_update_enabled && (
-                  <span className="bg-green-100 text-green-700 px-2 py-1 rounded">
-                    AI自動更新ON
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="flex gap-2 ml-4">
-              <button
-                onClick={() => onStartSession(project.id)}
-                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
-              >
-                セッション開始
-              </button>
-              <button
-                onClick={() => onEdit(project)}
-                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm"
-              >
-                編集
-              </button>
-              <button
-                onClick={() => onDelete(project.id)}
-                className="px-4 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 transition-colors text-sm"
-              >
-                削除
-              </button>
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-};
-
 // プロジェクト選択モーダルコンポーネント
 const ProjectSelectionModal = ({ 
   isOpen, 
@@ -2059,180 +413,76 @@ const ProjectSelectionModal = ({
   );
 };
 
-// プロジェクト作成/編集モーダルコンポーネント
-const ProjectModal = ({ 
-  isOpen, 
-  onClose, 
-  project, 
-  onSave 
+// プロジェクト一覧コンポーネント
+const ProjectList = ({ 
+  projects,
+  onEdit,
+  onDelete,
+  onStartSession
 }: {
-  isOpen: boolean;
-  onClose: () => void;
-  project?: Project | null;
-  onSave: () => void;
+  projects: Project[];
+  onEdit: (project: Project) => void;
+  onDelete: (projectId: string) => void;
+  onStartSession: (projectId: string) => void;
 }) => {
-  const [formData, setFormData] = useState({
-    project_name: '',
-    objectives: '',
-    project_purpose: '',
-    project_goals: '',
-    user_role: ''
-  });
-
-  useEffect(() => {
-    if (project) {
-      setFormData({
-        project_name: project.project_name || '',
-        objectives: project.objectives || '',
-        project_purpose: project.project_purpose || '',
-        project_goals: project.project_goals || '',
-        user_role: project.user_role || ''
-      });
-    } else {
-      setFormData({
-        project_name: '',
-        objectives: '',
-        project_purpose: '',
-        project_goals: '',
-        user_role: ''
-      });
-    }
-  }, [project, isOpen]);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
-    try {
-      const url = project 
-        ? `/api/projects/${project.id}`
-        : '/api/projects';
-      
-      const method = project ? 'PUT' : 'POST';
-      
-      const response = await fetch(url, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
-        },
-        body: JSON.stringify(formData)
-      });
-
-      if (response.ok) {
-        onSave();
-      }
-    } catch (error) {
-      console.error('保存エラー:', error);
-    }
-  };
-
-  if (!isOpen) return null;
+  if (projects.length === 0) {
+    return (
+      <div className="text-center py-12">
+        <div className="w-24 h-24 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
+          <svg className="w-12 h-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+        </div>
+        <p className="text-gray-500 text-lg mb-2">プロジェクトがまだありません</p>
+        <p className="text-gray-400 text-sm">新規プロジェクトを作成して、AIコーチと継続的な相談を始めましょう</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-2xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold text-gray-900">
-            {project ? 'プロジェクト編集' : '新規プロジェクト作成'}
-          </h2>
-          <button 
-            onClick={onClose}
-            className="text-gray-500 hover:text-gray-700 text-2xl"
-          >
-            ×
-          </button>
+    <div className="grid gap-4">
+      {projects.map((project) => (
+        <div key={project.id} className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
+          <div className="flex justify-between items-start">
+            <div className="flex-1">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                {project.project_name}
+              </h3>
+              <p className="text-sm text-gray-600 line-clamp-2 mb-3">
+                {project.objectives}
+              </p>
+              <div className="flex items-center space-x-4 text-xs text-gray-500">
+                <span>最終更新: {new Date(project.updated_at).toLocaleDateString('ja-JP')}</span>
+                {project.ai_auto_update_enabled && (
+                  <span className="bg-green-100 text-green-700 px-2 py-1 rounded">
+                    AI自動更新ON
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-2 ml-4">
+              <button
+                onClick={() => onStartSession(project.id)}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
+              >
+                セッション開始
+              </button>
+              <button
+                onClick={() => onEdit(project)}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm"
+              >
+                編集
+              </button>
+              <button
+                onClick={() => onDelete(project.id)}
+                className="px-4 py-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 transition-colors text-sm"
+              >
+                削除
+              </button>
+            </div>
+          </div>
         </div>
-
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div>
-            <label htmlFor="project_name" className="block text-sm font-medium text-gray-700 mb-1">
-              プロジェクト名 <span className="text-red-500">*</span>
-            </label>
-            <input
-              id="project_name"
-              type="text"
-              value={formData.project_name}
-              onChange={(e) => setFormData({ ...formData, project_name: e.target.value })}
-              placeholder="例: 新規ECサイト立ち上げプロジェクト"
-              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              required
-            />
-          </div>
-
-          <div>
-            <label htmlFor="objectives" className="block text-sm font-medium text-gray-700 mb-1">
-              このプロジェクトについて、セッションで叶えたいこと、解決したい問題 <span className="text-red-500">*</span>
-            </label>
-            <textarea
-              id="objectives"
-              value={formData.objectives}
-              onChange={(e) => setFormData({ ...formData, objectives: e.target.value })}
-              placeholder="例: ECサイトの要件定義から実装まで、技術選定やチーム編成について相談したい"
-              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              rows={3}
-              required
-            />
-          </div>
-
-          <div>
-            <label htmlFor="project_purpose" className="block text-sm font-medium text-gray-700 mb-1">
-              プロジェクトの目的
-            </label>
-            <textarea
-              id="project_purpose"
-              value={formData.project_purpose}
-              onChange={(e) => setFormData({ ...formData, project_purpose: e.target.value })}
-              placeholder="例: 自社商品のオンライン販売チャネルを確立し、売上の30%をEC経由にする"
-              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              rows={2}
-            />
-          </div>
-
-          <div>
-            <label htmlFor="project_goals" className="block text-sm font-medium text-gray-700 mb-1">
-              プロジェクトのゴール
-            </label>
-            <textarea
-              id="project_goals"
-              value={formData.project_goals}
-              onChange={(e) => setFormData({ ...formData, project_goals: e.target.value })}
-              placeholder="例: 2025年12月までにECサイトをローンチし、月商1000万円を達成する"
-              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              rows={2}
-            />
-          </div>
-
-          <div>
-            <label htmlFor="user_role" className="block text-sm font-medium text-gray-700 mb-1">
-              プロジェクト内でのあなたの役割
-            </label>
-            <input
-              id="user_role"
-              type="text"
-              value={formData.user_role}
-              onChange={(e) => setFormData({ ...formData, user_role: e.target.value })}
-              placeholder="例: プロジェクトマネージャー"
-              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-          </div>
-
-          <div className="flex justify-end gap-2 pt-4">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
-            >
-              キャンセル
-            </button>
-            <button
-              type="submit"
-              className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-semibold"
-            >
-              {project ? '更新' : '作成'}
-            </button>
-          </div>
-        </form>
-      </div>
+      ))}
     </div>
   );
 };
@@ -2242,12 +492,14 @@ const EnhancedProfileModal = ({
   isOpen, 
   onClose, 
   currentProfile, 
-  onSave 
+  onSave,
+  user  // 追加
 }: {
   isOpen: boolean;
   onClose: () => void;
   currentProfile: EnhancedUserProfile | null;
   onSave: (profile: Partial<EnhancedUserProfile>) => void;
+  user: User | null;  // 追加
 }) => {
   const [formData, setFormData] = useState({
     name: '',
@@ -2280,6 +532,7 @@ const EnhancedProfileModal = ({
   const [showSaveConfirmation, setShowSaveConfirmation] = useState(false);
 
   // 初期値設定
+  // 初期値設定
   useEffect(() => {
     if (currentProfile) {
       setFormData({
@@ -2307,8 +560,14 @@ const EnhancedProfileModal = ({
         customPersonalValues: currentProfile.customPersonalValues || [],
         newCustomValue: ''
       });
+    } else if (isOpen && user) {
+      // プロフィールがない場合は、ユーザーのメタデータから名前を設定
+      setFormData(prev => ({
+        ...prev,
+        name: user.user_metadata?.name || ''
+      }));
     }
-  }, [currentProfile, isOpen]);
+  }, [currentProfile, isOpen, user]);
 
   // 組織文化選択肢（20個に拡張）
   const organizationCultureOptions = [
@@ -3545,8 +1804,1623 @@ const AIInterviewModal = ({
   );
 };
 
+function HomeComponent() {
+  // State管理
+  const [conversation, setConversation] = useState<Message[]>([]);
+  const [selectedCoach, setSelectedCoach] = useState<CoachId>('tanaka');
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [textInput, setTextInput] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
+  const [editingContent, setEditingContent] = useState('');
+  const { user, signOut } = useAuth();
+
+  // 画面遷移管理用のState
+  const [currentPage, setCurrentPage] = useState<'home' | 'session' | 'projects'>('home');
+  const [selectedCoachForSession, setSelectedCoachForSession] = useState<CoachId>('tanaka');
+
+  // プロジェクトカルテ関連のState
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  const [showProjectModal, setShowProjectModal] = useState(false);
+  const [showProjectSelectionModal, setShowProjectSelectionModal] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [sessionId, setSessionId] = useState<string>('');
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'session'>('home');
+  const [aiAutoUpdateEnabled, setAiAutoUpdateEnabled] = useState(true);
+
+  // マイページ機能用のState
+  const [medicalRecord, setMedicalRecord] = useState<MedicalRecord>({
+    userProfile: null,
+    sessions: [],
+    totalSessions: 0,
+    favoriteCoach: null,
+    achievements: [],
+    currentGoals: []
+  });
+  const [showProfile, setShowProfile] = useState(false);
+  const [showMedicalRecord, setShowMedicalRecord] = useState(false);
+  const [showInterview, setShowInterview] = useState(false);
+  const [currentSessionStart, setCurrentSessionStart] = useState<Date | null>(null);
+  const [hasInitialMessage, setHasInitialMessage] = useState(false);
+
+  // Rate Limit関連のState
+  const [isRateLimited, setIsRateLimited] = useState(false);
+  const [rateLimitResetTime, setRateLimitResetTime] = useState<number | null>(null);
+  const [rateLimitCountdown, setRateLimitCountdown] = useState<number | null>(null);
+
+  // Refs
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
+  // クライアントサイドでの初期化
+  useEffect(() => {
+    // ローカルストレージからデータを読み込む
+    const loadMedicalRecord = (): MedicalRecord => {
+      try {
+        // ブラウザ環境かどうかを確認
+        if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+          const saved = localStorage.getItem('buddyai-medical-record');
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            parsed.sessions = parsed.sessions.map((session: any) => ({
+              ...session,
+              date: new Date(session.date)
+            }));
+            if (parsed.userProfile?.createdAt) {
+              parsed.userProfile.createdAt = new Date(parsed.userProfile.createdAt);
+              parsed.userProfile.updatedAt = new Date(parsed.userProfile.updatedAt);
+              if (parsed.userProfile.interviewCompletedAt) {
+                parsed.userProfile.interviewCompletedAt = new Date(parsed.userProfile.interviewCompletedAt);
+              }
+            }
+            return parsed;
+          }
+        }
+      } catch (error) {
+        console.error('マイページ読み込みエラー:', error);
+      }
+      
+      return {
+        userProfile: null,
+        sessions: [],
+        totalSessions: 0,
+        favoriteCoach: null,
+        achievements: [],
+        currentGoals: []
+      };
+    };
+
+    const savedRecord = loadMedicalRecord();
+    setMedicalRecord(savedRecord);
+    
+    // プロジェクト一覧を取得
+    fetchProjects();
+  }, []);
+
+  // プロジェクト一覧取得
+  const fetchProjects = async () => {
+    try {
+      const response = await fetch('/api/projects', {
+        headers: {
+          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setProjects(data.projects || []);
+      }
+    } catch (error) {
+      console.error('プロジェクト取得エラー:', error);
+    }
+  };
+
+  // Rate Limitカウントダウン用のuseEffect
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    
+    if (isRateLimited && rateLimitResetTime) {
+      interval = setInterval(() => {
+        const now = Date.now();
+        const remaining = Math.max(0, Math.ceil((rateLimitResetTime - now) / 1000));
+        
+        setRateLimitCountdown(remaining);
+        
+        if (remaining <= 0) {
+          setIsRateLimited(false);
+          setRateLimitResetTime(null);
+          setRateLimitCountdown(null);
+          setErrorMessage('');
+        }
+      }, 1000);
+    }
+    
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isRateLimited, rateLimitResetTime]);
+
+  // ローカルストレージ管理
+  const saveMedicalRecord = (record: MedicalRecord) => {
+    try {
+      // ブラウザ環境かどうかを確認
+      if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+        localStorage.setItem('buddyai-medical-record', JSON.stringify(record));
+      }
+    } catch (error) {
+      console.error('マイページ保存エラー:', error);
+    }
+  };
+
+  // セッション開始時の処理（プロジェクトカルテ統合版）
+  const handleStartSession = async (projectIds: string[], action: 'existing' | 'new' | 'none') => {
+    if (action === 'new') {
+      // 新規プロジェクト作成モーダルを開く
+      setShowProjectModal(true);
+      return;
+    }
+
+    // セッションを開始
+    const newSessionId = `session_${Date.now()}`;
+    
+    // プロジェクトとセッションを紐付け
+    if (action === 'existing' && projectIds.length > 0) {
+      for (const projectId of projectIds) {
+        await fetch('/api/session-projects', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            session_id: newSessionId,
+            project_id: projectId,
+            is_primary: projectIds[0] === projectId // 最初のプロジェクトを主とする
+          })
+        });
+      }
+      
+      // 選択されたプロジェクト情報を状態に保存
+      setSelectedProjects(projectIds);
+    }
+
+    // セッション画面に遷移
+    setCurrentScreen('session');
+    setSessionId(newSessionId);
+    setCurrentPage('session');
+    setConversation([]);
+    setHasInitialMessage(false);
+    setCurrentSessionStart(null);
+    setTimeout(() => showInitialMessage(), 100);
+  };
+
+  // 企業と個人のマッチ度計算
+  const calculateCompanyPersonalMatch = (organizationCulture: string[], personalValues: string[]): number => {
+    if (!organizationCulture || !personalValues || organizationCulture.length === 0 || personalValues.length === 0) {
+      return 50; // デフォルト値
+    }
+
+    // 組織文化と個人価値観のマッチングロジック
+    const cultureValueMapping: { [key: string]: string[] } = {
+      '年功序列が強い': ['stability', 'tradition', 'responsibility'],
+      'フラットな組織': ['autonomy', 'flexibility', 'communication'],
+      '実力主義': ['achievement', 'competition', 'recognition'],
+      '体育会系': ['teamwork', 'competition', 'challenge'],
+      'トップダウン': ['responsibility', 'leadership', 'efficiency'],
+      'ボトムアップ': ['autonomy', 'creativity', 'diversity'],
+      '稟議制が中心': ['stability', 'detail', 'ethics'],
+      '迅速な意思決定': ['speed', 'flexibility', 'efficiency'],
+      'チームワーク重視': ['teamwork', 'relationship', 'service'],
+      '個人成果重視': ['achievement', 'autonomy', 'recognition'],
+      '安定志向': ['stability', 'tradition', 'balance'],
+      'チャレンジ志向': ['challenge', 'innovation', 'growth'],
+      '伝統的な文化': ['tradition', 'responsibility', 'stability'],
+      '革新的な文化': ['innovation', 'creativity', 'challenge']
+    };
+
+    let matchPoints = 0;
+    let totalPoints = 0;
+
+    organizationCulture.forEach(culture => {
+      const relatedValues = cultureValueMapping[culture] || [];
+      relatedValues.forEach(value => {
+        totalPoints += 1;
+        if (personalValues.includes(value)) {
+          matchPoints += 1;
+        }
+      });
+    });
+
+    // 基本マッチ度 + ボーナス計算
+    const baseMatch = totalPoints > 0 ? (matchPoints / totalPoints) * 70 : 50;
+    
+    // 価値観の多様性ボーナス（3つ以上選択で+10）
+    const diversityBonus = personalValues.length >= 3 ? 10 : 0;
+    
+    // 特定の価値観組み合わせボーナス
+    let combinationBonus = 0;
+    if (personalValues.includes('teamwork') && personalValues.includes('leadership')) combinationBonus += 5;
+    if (personalValues.includes('growth') && personalValues.includes('challenge')) combinationBonus += 5;
+    if (personalValues.includes('efficiency') && personalValues.includes('quality')) combinationBonus += 5;
+
+    return Math.min(100, Math.round(baseMatch + diversityBonus + combinationBonus));
+  };
+
+  // プロフィール管理関数
+  const saveUserProfile = (profileData: Partial<EnhancedUserProfile>) => {
+    const calculatedMatch = calculateCompanyPersonalMatch(
+      profileData.organizationCulture || [],
+      profileData.personalValues || []
+    );
+
+    const newProfile: EnhancedUserProfile = {
+      name: profileData.name || '',
+      company: profileData.company || '',
+      position: profileData.position || '',
+      department: profileData.department || '',
+      industry: profileData.industry || 'manufacturer',
+      industryDetail: profileData.industryDetail || '',
+      companySize: profileData.companySize || '51-200',
+      businessType: profileData.businessType || '',
+      organizationCulture: profileData.organizationCulture || [],
+      dailyTasks: profileData.dailyTasks || [],
+      mainChallenges: profileData.mainChallenges || [],
+      goals: profileData.goals || [],
+      personalValues: profileData.personalValues || [],
+      companyPersonalMatch: calculatedMatch,
+      preferredCoach: profileData.preferredCoach || selectedCoach,
+      profileCompleteness: profileData.profileCompleteness || 0,
+      joinDate: profileData.joinDate || '',
+      jobDescription: profileData.jobDescription || '',
+      industrySelectionMethod: profileData.industrySelectionMethod || 'classification',
+      customOrganizationCulture: profileData.customOrganizationCulture || [],
+      selectedJobCategories: profileData.selectedJobCategories || [],
+      jobCategoryDetails: profileData.jobCategoryDetails || {},
+      customJobCategories: profileData.customJobCategories || [],
+      customPersonalValues: profileData.customPersonalValues || [],
+      interviewCompletedAt: profileData.interviewCompletedAt,
+      interviewInsights: profileData.interviewInsights,
+      interviewAnswers: profileData.interviewAnswers,
+      createdAt: medicalRecord.userProfile?.createdAt || new Date(),
+      updatedAt: new Date()
+    };
+    
+    const updatedRecord = {
+      ...medicalRecord,
+      userProfile: newProfile
+    };
+    
+    setMedicalRecord(updatedRecord);
+    saveMedicalRecord(updatedRecord);
+    console.log('✅ 拡張プロフィール保存完了:', newProfile);
+  };
+
+  // AIヒアリング完了処理
+  const handleInterviewComplete = (insights: string[], answers: any[]) => {
+    if (!medicalRecord.userProfile) return;
+    
+    const updatedProfile = {
+      ...medicalRecord.userProfile,
+      interviewInsights: insights,
+      interviewAnswers: answers,
+      interviewCompletedAt: new Date(),
+      profileCompleteness: Math.min(100, (medicalRecord.userProfile.profileCompleteness || 0) + (answers.length * 2))
+    };
+    
+    const updatedRecord = {
+      ...medicalRecord,
+      userProfile: updatedProfile
+    };
+    
+    setMedicalRecord(updatedRecord);
+    saveMedicalRecord(updatedRecord);
+    setShowInterview(false);
+    
+    console.log('✅ AIヒアリング結果統合完了:', insights.length, 'insights,', answers.length, 'answers');
+  };
+
+  // OpenAI API呼び出し関数
+  const getAIResponseParallel = async (messages: Message[], coachId: CoachId) => {
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: messages,
+          mode: coachId,
+          userProfile: medicalRecord.userProfile,
+          industryInsights: medicalRecord.userProfile ? industryMaster[medicalRecord.userProfile.industry]?.insights : null,
+          selectedProjects: selectedProjects,
+          sessionId: sessionId
+        }),
+      });
+      
+      if (response.status === 429) {
+        const errorData = await response.json();
+        
+        if (errorData.rateLimitExceeded) {
+          const resetHeader = response.headers.get('X-RateLimit-Reset');
+          const resetTime = resetHeader ? parseInt(resetHeader) * 1000 : Date.now() + 10 * 60 * 1000;
+          
+          setIsRateLimited(true);
+          setRateLimitResetTime(resetTime);
+          setErrorMessage('');
+          
+          throw new Error('RATE_LIMIT_EXCEEDED');
+        } else {
+          throw new Error('AI_SERVICE_BUSY');
+        }
+      }
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const aiContent = data.content || data.choices?.[0]?.message?.content;
+      
+      return aiContent;
+    } catch (error: any) {
+      console.error('💥 Error calling OpenAI API:', error);
+      throw error;
+    }
+  };
+
+  // セッション記録関数
+  const startSession = () => {
+    setCurrentSessionStart(new Date());
+    setErrorMessage('');
+  };
+
+  const calculateFavoriteCoach = (sessions: SessionRecord[]): CoachId => {
+    if (sessions.length === 0) return 'tanaka';
+    
+    const coachCounts = sessions.reduce((acc, session) => {
+      acc[session.coachId] = (acc[session.coachId] || 0) + 1;
+      return acc;
+    }, {} as Record<CoachId, number>);
+    
+    return Object.entries(coachCounts).reduce((a, b) => 
+      coachCounts[a[0] as CoachId] > coachCounts[b[0] as CoachId] ? a : b
+    )[0] as CoachId;
+  };
+
+  // 初回メッセージ表示関数
+  const showInitialMessage = () => {
+    if (hasInitialMessage) return;
+    
+    const initialMessage: Message = {
+      role: 'assistant',
+      content: presetCoaches[selectedCoach].initialMessage,
+      timestamp: new Date()
+    };
+    
+    setConversation([initialMessage]);
+    setHasInitialMessage(true);
+    
+    if (!currentSessionStart) {
+      startSession();
+    }
+  };
+
+  // セッション更新関数
+  const updateCurrentSession = (messageCount: number, topics: string[]) => {
+    if (!currentSessionStart) return;
+    
+    const currentTime = new Date();
+    const duration = Math.round((currentTime.getTime() - currentSessionStart.getTime()) / (1000 * 60));
+    
+    const updatedSession: SessionRecord = {
+      id: currentSessionStart.getTime().toString(),
+      date: currentSessionStart,
+      coachId: selectedCoach,
+      duration: Math.max(1, duration),
+      messageCount,
+      topics,
+      summary: `${presetCoaches[selectedCoach].name}とのセッション（${messageCount}メッセージ）`,
+      satisfaction: 0,
+      nextActions: []
+    };
+    
+    setMedicalRecord(prev => {
+      const existingIndex = prev.sessions.findIndex(s => s.id === updatedSession.id);
+      let newSessions;
+      
+      if (existingIndex >= 0) {
+        newSessions = [...prev.sessions];
+        newSessions[existingIndex] = updatedSession;
+      } else {
+        newSessions = [...prev.sessions, updatedSession];
+      }
+      
+      const newRecord = {
+        ...prev,
+        sessions: newSessions,
+        totalSessions: newSessions.length,
+        favoriteCoach: calculateFavoriteCoach(newSessions)
+      };
+      
+      saveMedicalRecord(newRecord);
+      return newRecord;
+    });
+  };
+
+  // 会話処理関数
+  const processConversation = async (newMessage: Message) => {
+    if (isRateLimited) return;
+    
+    if (!currentSessionStart) {
+      startSession();
+    }
+    
+    try {
+      setIsLoading(true);
+      setErrorMessage('');
+      
+      const updatedConversation = [...conversation, newMessage];
+      setConversation(updatedConversation);
+      
+      const aiResponse = await getAIResponseParallel(updatedConversation, selectedCoach);
+      
+      if (aiResponse && aiResponse.trim()) {
+        const assistantMessage: Message = {
+          role: 'assistant',
+          content: aiResponse,
+          timestamp: new Date(),
+        };
+        
+        setConversation(prev => {
+          const newConv = [...prev, assistantMessage];
+          
+          if (currentSessionStart) {
+            const messageCount = newConv.length;
+            const topics = newConv
+              .filter(msg => msg.role === 'user')
+              .map(msg => msg.content.substring(0, 50))
+              .slice(-3);
+            
+            updateCurrentSession(messageCount, topics);
+          }
+          
+          return newConv;
+        });
+        
+        // プロジェクトカルテのAI自動更新
+        if (aiAutoUpdateEnabled && selectedProjects.length > 0) {
+          selectedProjects.forEach(async (projectId) => {
+            await fetch(`/api/projects/${projectId}/ai-update`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                conversation: updatedConversation.map(msg => ({
+                  role: msg.role,
+                  content: msg.content
+                })),
+                sessionId: sessionId
+              })
+            });
+          });
+        }
+      } else {
+        setErrorMessage('すみません、もう一度お話しいただけますか？');
+      }
+    } catch (error: any) {
+      if (error.message === 'RATE_LIMIT_EXCEEDED') {
+        // 既に処理済み
+      } else if (error.message === 'AI_SERVICE_BUSY') {
+        setErrorMessage('AIサービスが混雑しています。少し時間をおいて再度お試しください。');
+      } else {
+        setErrorMessage('すみません、もう一度お話しいただけますか？');
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 音声認識機能
+  const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+
+      const response = await fetch('/api/chat/transcribe', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (response.status === 429) {
+        const errorData = await response.json();
+        
+        if (errorData.rateLimitExceeded) {
+          const resetHeader = response.headers.get('X-RateLimit-Reset');
+          const resetTime = resetHeader ? parseInt(resetHeader) * 1000 : Date.now() + 10 * 60 * 1000;
+          
+          setIsRateLimited(true);
+          setRateLimitResetTime(resetTime);
+          setErrorMessage('');
+          
+          return 'RATE_LIMIT_EXCEEDED';
+        } else {
+          return '音声認識サービスが混雑しています。少し時間をおいて再度お試しください。';
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data.text || 'テキストを認識できませんでした。';
+    } catch (error) {
+      console.error('音声認識エラー:', error);
+      return 'テキストを認識できませんでした。';
+    }
+  };
+
+  // 録音機能
+  const startRecording = async () => {
+    if (isRateLimited) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        audioChunksRef.current.push(event.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const transcribedText = await transcribeAudio(audioBlob);
+        
+        if (transcribedText === 'RATE_LIMIT_EXCEEDED') {
+          // 既に処理済み
+        } else if (transcribedText && transcribedText !== 'テキストを認識できませんでした。') {
+          const newMessage: Message = {
+            role: 'user',
+            content: transcribedText,
+            timestamp: new Date(),
+          };
+          await processConversation(newMessage);
+        } else {
+          setErrorMessage('音声を認識できませんでした。もう一度お試しください。');
+        }
+
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (error) {
+      console.error('録音開始エラー:', error);
+      setErrorMessage('マイクへのアクセスが許可されていません。');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  // メッセージ送信
+  const sendTextMessage = async () => {
+    if (!textInput.trim() && !attachedFile) return;
+    if (isRateLimited) return;
+
+    const newMessage: Message = {
+      role: 'user',
+      content: textInput.trim(),
+      timestamp: new Date(),
+      attachment: attachedFile || undefined,
+    };
+
+    setTextInput('');
+    setAttachedFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+
+    await processConversation(newMessage);
+  };
+
+  // ファイル添付
+  const handleFileAttachment = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setAttachedFile(file);
+    }
+  };
+
+  // メッセージ編集
+  const startEditingMessage = (index: number) => {
+    setEditingMessageIndex(index);
+    setEditingContent(conversation[index].content);
+  };
+
+  const saveEditedMessage = () => {
+    if (editingMessageIndex !== null) {
+      const updatedConversation = [...conversation];
+      updatedConversation[editingMessageIndex].content = editingContent;
+      setConversation(updatedConversation);
+      setEditingMessageIndex(null);
+      setEditingContent('');
+    }
+  };
+
+  const cancelEditing = () => {
+    setEditingMessageIndex(null);
+    setEditingContent('');
+  };
+
+  // 初回メッセージの表示（セッション画面でのみ）
+  useEffect(() => {
+    if (currentPage === 'session' && !hasInitialMessage && conversation.length === 0) {
+      showInitialMessage();
+    }
+  }, [selectedCoach, hasInitialMessage, conversation.length, currentPage]);
+
+  // プロジェクト削除
+  const handleDeleteProject = async (projectId: string) => {
+    if (!confirm('このプロジェクトを削除してもよろしいですか？')) return;
+    
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, {
+        method: 'DELETE',
+        headers: {
+          'user-id': 'test-user-id' // TODO: 実際のユーザーIDを使用
+        }
+      });
+      
+      if (response.ok) {
+        fetchProjects();
+      }
+    } catch (error) {
+      console.error('プロジェクト削除エラー:', error);
+    }
+  };
+
+  return (
+    <div 
+      className="min-h-screen flex flex-col"
+      style={{ 
+        background: 'linear-gradient(135deg, #FDFEF0 0%, #F8F6F0 25%, #F0EBE5 50%, #E8DFD8 75%, #CCBEB8 100%)'
+      }}
+      suppressHydrationWarning={true}
+    >
+      {currentPage === 'home' ? (
+        // 🎨 トップページ
+        <>
+          {/* 固定ヘッダー */}
+          <header className="fixed top-0 left-0 right-0 bg-white bg-opacity-90 backdrop-blur-md shadow-sm border-b z-50">
+            <div className="max-w-7xl mx-auto px-4 py-4">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center space-x-4">
+                  {/* ロゴ */}
+                  <img 
+                    src="/logo-buddyai-for-biz.png" 
+                    alt="Buddy AI for Biz" 
+                    className="h-16 w-auto"
+                    onError={(e) => {
+                      const target = e.target as HTMLImageElement;
+                      target.style.display = 'none';
+                      const fallback = target.nextElementSibling as HTMLElement;
+                      if (fallback) fallback.classList.remove('hidden');
+                    }}
+                  />
+                  {/* ロゴ読み込み失敗時のフォールバック */}
+                  <div className="hidden flex items-center space-x-3">
+                    <div className="w-12 h-12 bg-gradient-to-r from-orange-400 to-pink-500 rounded-xl flex items-center justify-center">
+                      <span className="text-2xl">🤖</span>
+                    </div>
+                    <div>
+                      <h1 className="text-2xl font-bold text-gray-800">Buddy AI for Biz</h1>
+                      <p className="text-gray-600 text-sm">Your AI Business Coach</p>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="flex items-center space-x-4">
+                  {user && (
+                    <div className="text-right text-gray-800">
+                      <div className="font-semibold">
+                        {medicalRecord.userProfile?.name || user.user_metadata?.name || 'ユーザー'}さん
+                      </div>
+                      {medicalRecord.userProfile && (
+                        <>
+                          <div className="text-sm text-gray-600">
+                            {medicalRecord.userProfile.company || '会社未設定'} | {industryMaster[medicalRecord.userProfile.industry]?.label || '業界未設定'}
+                          </div>
+                          {/* プロフィール完成度表示 */}
+                          <div className="flex items-center space-x-2 mt-1">
+                            <div className="w-16 bg-gray-200 rounded-full h-1.5">
+                              <div 
+                                className="bg-gradient-to-r from-blue-500 to-green-500 h-1.5 rounded-full transition-all"
+                                style={{ width: `${medicalRecord.userProfile.profileCompleteness || 0}%` }}
+                              ></div>
+                            </div>
+                            <span className="text-xs text-gray-500">{medicalRecord.userProfile.profileCompleteness || 0}%</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setShowProfile(true)}
+                    className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
+                  >
+                    🏢 ベースカルテ
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage('projects')}
+                    className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
+                  >
+                    📁 プロジェクトカルテ
+                  </button>
+                  {/* AIヒアリングボタン */}
+                  {medicalRecord.userProfile && (medicalRecord.userProfile.profileCompleteness || 0) >= 60 && (
+                    <button
+                      onClick={() => setShowInterview(true)}
+                      className={`px-4 py-2 rounded-lg transition-all border shadow-sm ${
+                        medicalRecord.userProfile.interviewCompletedAt
+                          ? 'bg-green-100 text-green-700 border-green-200'
+                          : 'bg-orange-100 text-orange-700 border-orange-200 animate-pulse'
+                      }`}
+                    >
+                      🎤 {medicalRecord.userProfile.interviewCompletedAt ? 'ヒアリング済み' : 'AIヒアリング'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowMedicalRecord(true)}
+                    className="bg-white bg-opacity-80 backdrop-blur-sm text-gray-800 px-4 py-2 rounded-lg hover:bg-white hover:bg-opacity-90 transition-all border border-gray-200 shadow-sm"
+                  >
+                    📋 マイページ
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (confirm('ログアウトしますか？')) {
+                        await signOut()
+                      }
+                    }}
+                    className="bg-red-100 text-red-600 px-4 py-2 rounded-lg hover:bg-red-200 transition-all border border-red-200 shadow-sm"
+                  >
+                    🚪 ログアウト
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          {/* メインコンテンツ */}
+          <div className="pt-20">
+            {/* GIFアニメーション表示エリア */}
+            <div className="w-full pb-8 bg-white bg-opacity-30">
+              <img 
+                src="/hero-animation.gif" 
+                alt="Hero Animation" 
+                className="w-[90%] h-auto mx-auto shadow-lg"
+                onError={(e) => {
+                  const target = e.target as HTMLImageElement;
+                  target.style.display = 'none';
+                  const fallback = target.nextElementSibling as HTMLElement;
+                  if (fallback) fallback.classList.remove('hidden');
+                }}
+              />
+              {/* GIF読み込み失敗時のフォールバック */}
+              <div className="hidden">
+                <div className="w-[90%] h-64 bg-gradient-to-r from-orange-400 via-pink-500 to-purple-600 flex items-center justify-center mx-auto">
+                  <span className="text-white text-2xl font-bold">🚀 AI Powered Business Coaching</span>
+                </div>
+              </div>
+            </div>
+
+            {/* メインヒーローコンテンツ */}
+            <div className="relative min-h-screen overflow-hidden">
+              <div className="relative z-10 max-w-7xl mx-auto px-4 py-20">
+                <div className="text-center">
+                  <div className="inline-flex items-center bg-white bg-opacity-70 backdrop-blur-sm rounded-full px-6 py-2 text-gray-800 text-sm font-medium mb-8 border border-gray-200 shadow-sm">
+                    <span className="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>
+                    AI-Powered Business Coaching
+                  </div>
+                  
+                  <h1 className="text-5xl md:text-7xl font-bold text-gray-900 mb-8 leading-tight">
+                    あなた専属の
+                    <span 
+                      className="block"
+                      style={{
+                        background: 'linear-gradient(90deg, #DB0A3C 0%, #643498 100%)',
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        backgroundClip: 'text'
+                      }}
+                    >
+                      AIコーチ陣
+                    </span>
+                    がビジネスを変革
+                  </h1>
+                  
+                  <p className="text-xl text-gray-700 mb-12 max-w-3xl mx-auto leading-relaxed">
+                    専門AIコーチが、あなたのビジネス課題を解決。戦略からメンタルケアまで、
+                    <br />包括的なサポートで成果を最大化させます。
+                  </p>
+
+                  <div className="flex flex-col items-center space-y-8">
+                    <button
+                      onClick={() => setShowProjectSelectionModal(true)}
+                      className="group relative px-8 py-4 text-white text-lg font-semibold rounded-2xl transition-all transform hover:scale-105 shadow-xl"
+                      style={{
+                        background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
+                      }}
+                    >
+                      <span className="relative z-10">🚀 今すぐ無料で始める</span>
+                    </button>
+                    
+                    <div className="flex space-x-8 text-gray-800">
+                      <div className="text-center">
+                        <div className="text-3xl font-bold text-orange-500">{medicalRecord.totalSessions}</div>
+                        <div className="text-sm text-gray-600">総セッション数</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-3xl font-bold text-pink-500">
+                          {Math.round(medicalRecord.sessions.reduce((acc, s) => acc + s.duration, 0) / Math.max(1, medicalRecord.sessions.length)) || 0}分
+                        </div>
+                        <div className="text-sm text-gray-600">平均セッション時間</div>
+                      </div>
+                      <div className="text-center">
+                        <div className="text-3xl font-bold text-purple-500">4</div>
+                        <div className="text-sm text-gray-600">コーチオプション</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* コーチ紹介セクション */}
+            <div className="bg-white bg-opacity-60 backdrop-blur-sm py-20">
+              <div className="max-w-7xl mx-auto px-4">
+                <div className="text-center mb-16">
+                  <h2 className="text-4xl font-bold text-gray-900 mb-4">あなた専属のAIコーチ陣</h2>
+                  <p className="text-xl text-gray-600 max-w-3xl mx-auto">
+                    専門分野を持つAIコーチから選択、またはオリジナルコーチを作成できます
+                  </p>
+                  
+                  {/* プロフィール完成度による案内 */}
+                  {medicalRecord.userProfile && (medicalRecord.userProfile.profileCompleteness || 0) < 60 && (
+                    <div className="mt-6 max-w-2xl mx-auto bg-gradient-to-r from-orange-50 to-yellow-50 border border-orange-200 rounded-xl p-4">
+                      <div className="flex items-center justify-center space-x-3">
+                        <span className="text-2xl">⚡</span>
+                        <div>
+                          <p className="text-orange-800 font-semibold">より良いコーチングのために</p>
+                          <p className="text-orange-700 text-sm">ベースカルテを詳しく設定すると、あなたに最適化されたアドバイスが受けられます</p>
+                        </div>
+                        <button
+                          onClick={() => setShowProfile(true)}
+                          className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-sm font-semibold"
+                        >
+                          設定する
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* AIヒアリング案内 */}
+                  {medicalRecord.userProfile && 
+                   (medicalRecord.userProfile.profileCompleteness || 0) >= 60 && 
+                   !medicalRecord.userProfile.interviewCompletedAt && (
+                    <div className="mt-6 max-w-2xl mx-auto bg-gradient-to-r from-blue-50 to-purple-50 border border-blue-200 rounded-xl p-4">
+                      <div className="flex items-center justify-center space-x-3">
+                        <span className="text-2xl">🎤</span>
+                        <div>
+                          <p className="text-blue-800 font-semibold">AIヒアリングで更なる最適化</p>
+                          <p className="text-blue-700 text-sm">数問の追加質問で、より深いインサイトとパーソナライズドコーチングを実現</p>
+                        </div>
+                        <button
+                          onClick={() => setShowInterview(true)}
+                          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm font-semibold"
+                        >
+                          開始する
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="overflow-x-auto pb-6">
+                  <div className="flex space-x-6 min-w-max px-4">
+                    {Object.entries(presetCoaches).map(([key, coach]) => (
+                      <div
+                        key={key}
+                        className={`group relative bg-gradient-to-br from-white to-gray-50 rounded-3xl p-8 shadow-lg hover:shadow-2xl transition-all duration-500 transform hover:-translate-y-2 cursor-pointer border-2 w-80 flex-shrink-0 ${
+                          selectedCoachForSession === key 
+                            ? 'border-orange-400 ring-4 ring-orange-100 shadow-2xl' 
+                            : 'border-gray-200 hover:border-gray-300'
+                        }`}
+                        onClick={() => setSelectedCoachForSession(key as CoachId)}
+                      >
+                        <div className={`absolute inset-0 bg-gradient-to-br ${coach.color} opacity-5 rounded-3xl`}></div>
+                        
+                        <div className="relative z-10 text-center">
+                          <div className={`w-20 h-20 mx-auto mb-6 bg-gradient-to-br ${coach.color} rounded-2xl flex items-center justify-center transform group-hover:scale-110 transition-transform duration-300 shadow-lg`}>
+                            <span className="text-3xl">{coach.avatar}</span>
+                          </div>
+                          
+                          <h3 className="text-xl font-bold text-gray-900 mb-2">{coach.name}</h3>
+                          <p className="text-sm font-semibold text-gray-600 mb-4">{coach.title}</p>
+                          
+                          <div className="text-xs text-gray-500 mb-4 leading-relaxed">
+                            {coach.specialty}
+                          </div>
+                          
+                          <p className="text-sm text-gray-700 leading-relaxed">
+                            {coach.description}
+                          </p>
+                          
+                          {selectedCoachForSession === key && (
+                            <div className="absolute -top-2 -right-2 w-6 h-6 bg-orange-500 rounded-full flex items-center justify-center animate-pulse">
+                              <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                              </svg>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* カスタムコーチカード */}
+                    <div className="group relative bg-gradient-to-br from-gray-50 to-gray-100 rounded-3xl p-8 shadow-lg hover:shadow-2xl transition-all duration-500 transform hover:-translate-y-2 cursor-pointer border-2 border-dashed border-gray-300 hover:border-orange-400 w-80 flex-shrink-0">
+                      <div className="absolute -top-3 -right-3 bg-gradient-to-r from-yellow-400 to-orange-500 text-white text-xs font-bold px-3 py-1 rounded-full shadow-lg animate-pulse">
+                        PREMIUM
+                      </div>
+                      
+                      <div className="text-center">
+                        <div className="w-20 h-20 mx-auto mb-6 bg-gradient-to-br from-gray-300 to-gray-400 rounded-2xl flex items-center justify-center transform group-hover:scale-110 transition-transform duration-300 shadow-lg relative overflow-hidden">
+                          <span className="text-3xl">⚙️</span>
+                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent transform -skew-x-12 -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
+                        </div>
+                        
+                        <h3 className="text-xl font-bold text-gray-900 mb-2">カスタムコーチ</h3>
+                        <p className="text-sm font-semibold text-orange-600 mb-4">オリジナル作成</p>
+                        
+                        <div className="text-xs text-gray-500 mb-4 leading-relaxed space-y-1">
+                          <div>✨ 完全カスタマイズ可能</div>
+                          <div>🎯 専門分野を自由設定</div>
+                          <div>🗣️ 話し方・性格を調整</div>
+                          <div>📚 独自知識ベース対応</div>
+                        </div>
+                        
+                        <button className="w-full mt-4 px-4 py-2 bg-gradient-to-r from-orange-500 to-pink-500 text-white text-sm font-semibold rounded-xl hover:from-orange-600 hover:to-pink-600 transition-all transform hover:scale-105 shadow-md">
+                          🚀 プレミアムにアップグレード
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-center mt-12">
+                  <button
+                    onClick={() => {
+                      setSelectedCoach(selectedCoachForSession);
+                      setShowProjectSelectionModal(true);
+                    }}
+                    className="group relative px-10 py-4 text-white text-lg font-semibold rounded-2xl hover:shadow-xl transition-all transform hover:scale-105"
+                    style={{
+                      background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
+                    }}
+                  >
+                    <span className="relative z-10">
+                      🚀 {presetCoaches[selectedCoachForSession].name}とセッション開始
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* ダッシュボード */}
+            <div className="bg-gradient-to-br from-gray-50 to-white py-20">
+              <div className="max-w-7xl mx-auto px-4">
+                <div className="text-center mb-16">
+                  <h2 className="text-4xl font-bold text-gray-900 mb-4">あなたの成長データ</h2>
+                  <p className="text-xl text-gray-600">AIコーチングの効果を数値で確認できます</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-12">
+                  <div className="bg-gradient-to-br from-orange-50 to-orange-100 rounded-3xl p-8 text-center transform hover:scale-105 transition-transform shadow-lg">
+                    <div className="w-16 h-16 bg-orange-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                      </svg>
+                    </div>
+                    <div className="text-4xl font-bold text-orange-600 mb-2">{medicalRecord.totalSessions}</div>
+                    <div className="text-orange-800 font-semibold">総セッション数</div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-pink-50 to-pink-100 rounded-3xl p-8 text-center transform hover:scale-105 transition-transform shadow-lg">
+                    <div className="w-16 h-16 bg-pink-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                      </svg>
+                    </div>
+                    <div className="text-4xl font-bold text-pink-600 mb-2">
+                      {medicalRecord.favoriteCoach ? presetCoaches[medicalRecord.favoriteCoach].name.split(' ')[0] : '未設定'}
+                    </div>
+                    <div className="text-pink-800 font-semibold">お気に入りコーチ</div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-3xl p-8 text-center transform hover:scale-105 transition-transform shadow-lg">
+                    <div className="w-16 h-16 bg-purple-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <div className="text-4xl font-bold text-purple-600 mb-2">
+                      {Math.round(medicalRecord.sessions.reduce((acc, s) => acc + s.duration, 0) / Math.max(1, medicalRecord.sessions.length)) || 0}分
+                    </div>
+                    <div className="text-purple-800 font-semibold">平均セッション時間</div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-3xl p-8 shadow-lg">
+                  <div className="flex justify-between items-center mb-8">
+                    <h3 className="text-2xl font-bold text-gray-900">🕒 最近のセッション</h3>
+                    <button
+                      onClick={() => setShowMedicalRecord(true)}
+                      className="px-6 py-3 text-white rounded-xl transition-colors font-semibold shadow-md"
+                      style={{
+                        background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
+                      }}
+                    >
+                      すべて見る
+                    </button>
+                  </div>
+                  
+                  {medicalRecord.sessions.length === 0 ? (
+                    <div className="text-center py-12">
+                      <div className="w-20 h-20 bg-gray-200 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <svg className="w-10 h-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                        </svg>
+                      </div>
+                      <p className="text-gray-500 text-lg">まだセッション履歴がありません</p>
+                      <p className="text-gray-400 text-sm mt-2">最初のAIコーチングセッションを始めましょう！</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      {medicalRecord.sessions.slice().reverse().slice(0, 6).map((session) => (
+                        <div key={session.id} className="bg-gradient-to-br from-gray-50 to-white rounded-2xl p-6 shadow-sm hover:shadow-md transition-shadow border border-gray-100">
+                          <div className="flex items-center space-x-3 mb-4">
+                            <div className={`w-10 h-10 ${presetCoaches[session.coachId].color} rounded-xl flex items-center justify-center`}>
+                              <span className="text-lg">{presetCoaches[session.coachId].avatar}</span>
+                            </div>
+                            <div>
+                              <div className="font-semibold text-gray-900">{presetCoaches[session.coachId].name}</div>
+                              <div className="text-sm text-gray-500">
+                                {session.date.toLocaleDateString('ja-JP')}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex justify-between text-sm text-gray-600">
+                            <span>{session.duration}分</span>
+                            <span>{session.messageCount}メッセージ</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* フッターCTA */}
+            <div 
+              className="py-20"
+              style={{
+                background: 'linear-gradient(135deg, #DB0A3C 0%, #643498 100%)'
+              }}
+            >
+              <div className="max-w-4xl mx-auto text-center px-4">
+                <h2 className="text-4xl font-bold text-white mb-4">
+                  今すぐAIコーチングを体験
+                </h2>
+                <p className="text-xl text-pink-100 mb-8">
+                  あなたのビジネス課題を、専門AIコーチと一緒に解決しませんか？
+                </p>
+                <button
+                  onClick={() => {
+                    setSelectedCoach(selectedCoachForSession);
+                    setShowProjectSelectionModal(true);
+                  }}
+                  className="px-10 py-4 bg-white text-pink-600 text-lg font-bold rounded-2xl hover:bg-gray-100 transition-all transform hover:scale-105 shadow-xl"
+                >
+                  🚀 {presetCoaches[selectedCoachForSession].name}とセッション開始
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : currentPage === 'projects' ? (
+        // プロジェクトカルテ一覧画面
+        <>
+          <header className="bg-white shadow-sm border-b">
+            <div className="max-w-7xl mx-auto px-4 py-4">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center space-x-4">
+                  <button
+                    onClick={() => setCurrentPage('home')}
+                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                  >
+                    ← ホームに戻る
+                  </button>
+                  <h1 className="text-2xl font-bold text-gray-800">📁 プロジェクトカルテ管理</h1>
+                </div>
+                <button
+                  onClick={() => {
+                    setEditingProject(null);
+                    setShowProjectModal(true);
+                  }}
+                  className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors font-semibold"
+                >
+                  ＋ 新規プロジェクト作成
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <div className="max-w-7xl mx-auto px-4 py-8">
+            <ProjectList 
+              projects={projects}
+              onEdit={(project) => {
+                setEditingProject(project);
+                setShowProjectModal(true);
+              }}
+              onDelete={handleDeleteProject}
+              onStartSession={(projectId) => {
+                handleStartSession([projectId], 'existing');
+              }}
+            />
+          </div>
+        </>
+      ) : (
+        // セッション画面
+        <>
+          <header className="bg-white shadow-sm border-b">
+            <div className="max-w-4xl mx-auto px-4 py-4">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center space-x-4">
+                  <button
+                    onClick={() => setCurrentPage('home')}
+                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                  >
+                    ← ホームに戻る
+                  </button>
+                  <div>
+                    <h1 className="text-xl font-bold text-gray-800">
+                      {presetCoaches[selectedCoach].avatar} {presetCoaches[selectedCoach].name}
+                    </h1>
+                    <p className="text-gray-600 text-sm">{presetCoaches[selectedCoach].title}</p>
+                  </div>
+                </div>
+                <div className="flex space-x-2">
+                  {selectedProjects.length > 0 && (
+                    <div className="flex items-center space-x-4">
+                      <div className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm">
+                        📁 {selectedProjects.length}個のプロジェクト選択中
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <span className="text-sm text-gray-600">AIコーチによるプロジェクトカルテ自動更新:</span>
+                        <button
+                          onClick={() => setAiAutoUpdateEnabled(!aiAutoUpdateEnabled)}
+                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                            aiAutoUpdateEnabled ? 'bg-blue-600' : 'bg-gray-300'
+                          }`}
+                        >
+                          <span
+                            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                              aiAutoUpdateEnabled ? 'translate-x-6' : 'translate-x-1'
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setShowProfile(true)}
+                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                  >
+                    🏢 ベースカルテ
+                  </button>
+                  <button
+                    onClick={() => setShowMedicalRecord(true)}
+                    className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"
+                  >
+                    📋 マイページ
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <div className="flex-1 max-w-4xl mx-auto w-full px-4 py-6 overflow-y-auto">
+            {isRateLimited && (
+              <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <div className="flex items-center space-x-2 text-yellow-800">
+                  <span className="text-2xl">⏰</span>
+                  <div>
+                    <div className="font-semibold">利用制限に達しました</div>
+                    <div className="text-sm">
+                      {rateLimitCountdown !== null ? (
+                        <>あと {Math.floor(rateLimitCountdown / 60)}分{rateLimitCountdown % 60}秒で利用可能になります</>
+                      ) : (
+                        '10分後に再度お試しください'
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {conversation.map((message, index) => (
+                <div
+                  key={index}
+                  className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg relative group ${
+                      message.role === 'user'
+                        ? 'bg-blue-500 text-white'
+                        : 'bg-white text-gray-800 shadow-sm border'
+                    }`}
+                  >
+                    {editingMessageIndex === index ? (
+                      <div className="space-y-2">
+                        <textarea
+                          value={editingContent}
+                          onChange={(e) => setEditingContent(e.target.value)}
+                          className="w-full p-2 border rounded text-[#0E2841]"
+                          rows={3}
+                        />
+                        <div className="flex space-x-2">
+                          <button
+                            onClick={saveEditedMessage}
+                            className="px-3 py-1 bg-blue-500 text-white rounded text-sm"
+                          >
+                            保存
+                          </button>
+                          <button
+                            onClick={cancelEditing}
+                            className="px-3 py-1 bg-gray-500 text-white rounded text-sm"
+                          >
+                            キャンセル
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="whitespace-pre-wrap">{message.content}</div>
+                        {message.attachment && (
+                          <div className="text-xs mt-2 opacity-75">
+                            📎 {message.attachment.name}
+                          </div>
+                        )}
+                        {message.role === 'user' && (
+                          <button
+                            onClick={() => startEditingMessage(index)}
+                            className="absolute top-0 right-0 -mt-2 -mr-2 bg-gray-600 text-white rounded-full w-6 h-6 text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            ✏️
+                          </button>
+                        )}
+                      </>
+                    )}
+                    <div className="text-xs opacity-75 mt-1">
+                      {message.timestamp.toLocaleTimeString()}
+                    </div>
+                  </div>
+                </div>
+              ))}
+
+              {isLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-white text-gray-800 shadow-sm border px-4 py-2 rounded-lg">
+                    <div className="flex items-center space-x-2">
+                      <div className="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+                      <span>考え中...</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {errorMessage && !isRateLimited && (
+                <div className="text-center text-red-500 text-sm">{errorMessage}</div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white border-t">
+            <div className="max-w-4xl mx-auto px-4 py-4">
+              <div className="flex items-end space-x-2">
+                <div className="flex-1">
+                  <div className="flex items-center space-x-2 mb-2">
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileAttachment}
+                      className="hidden"
+                      accept=".txt,.pdf,.doc,.docx,.xls,.xlsx"
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isRateLimited}
+                      className={`p-2 transition-colors ${
+                        isRateLimited 
+                          ? 'text-gray-300 cursor-not-allowed' 
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                      title="ファイル添付"
+                    >
+                      📎
+                    </button>
+                    {attachedFile && (
+                      <span className="text-sm text-gray-600">
+                        {attachedFile.name}
+                        <button
+                          onClick={() => setAttachedFile(null)}
+                          disabled={isRateLimited}
+                          className={`ml-2 ${
+                            isRateLimited 
+                              ? 'text-gray-300 cursor-not-allowed' 
+                              : 'text-red-500 hover:text-red-700'
+                          }`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                  <textarea
+                    value={textInput}
+                    onChange={(e) => setTextInput(e.target.value)}
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey && !isRateLimited) {
+                        e.preventDefault();
+                        sendTextMessage();
+                      }
+                    }}
+                    placeholder={isRateLimited ? "利用制限中です..." : "メッセージを入力してください..."}
+                    className={`w-full p-3 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 text-[#0E2841] ${
+                      isRateLimited ? 'bg-gray-100 cursor-not-allowed' : ''
+                    }`}
+                    rows={3}
+                    disabled={isLoading || isRateLimited}
+                  />
+                </div>
+                <div className="flex flex-col space-y-2">
+                  <button
+                    onClick={sendTextMessage}
+                    disabled={isLoading || (!textInput.trim() && !attachedFile) || isRateLimited}
+                    className={`px-6 py-3 rounded-lg transition-colors ${
+                      isRateLimited
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        : 'bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed'
+                    }`}
+                  >
+                    送信
+                  </button>
+                  <button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    disabled={isLoading || isRateLimited}
+                    className={`px-6 py-3 rounded-lg transition-colors ${
+                      isRateLimited
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        : isRecording
+                        ? 'bg-red-500 hover:bg-red-600 text-white'
+                        : 'bg-gray-500 hover:bg-gray-600 text-white'
+                    }`}
+                  >
+                    {isRecording ? '🔴 停止' : '🎤 録音'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* プロジェクト選択モーダル */}
+      <ProjectSelectionModal
+        isOpen={showProjectSelectionModal}
+        onClose={() => setShowProjectSelectionModal(false)}
+        projects={projects}
+        onStartSession={handleStartSession}
+      />
+
+      {/* プロジェクト作成/編集モーダル */}
+      <ProjectModal
+        isOpen={showProjectModal}
+        onClose={() => {
+          setShowProjectModal(false);
+          setEditingProject(null);
+        }}
+        project={editingProject}
+        onSave={() => {
+          fetchProjects();
+          setShowProjectModal(false);
+          setEditingProject(null);
+        }}
+      />
+
+      {/* 拡張プロフィールモーダル */}
+      <EnhancedProfileModal
+        isOpen={showProfile}
+        onClose={() => setShowProfile(false)}
+        currentProfile={medicalRecord.userProfile}
+        onSave={saveUserProfile}
+        user={user}  // 追加
+      />
+
+      {/* AIヒアリングモーダル */}
+      {medicalRecord.userProfile && (
+        <AIInterviewModal
+          isOpen={showInterview}
+          onClose={() => setShowInterview(false)}
+          userProfile={medicalRecord.userProfile}
+          onComplete={handleInterviewComplete}
+        />
+      )}
+
+      {showMedicalRecord && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 w-full max-w-4xl mx-4 max-h-[80vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-2xl font-bold">📋 あなたのマイページ</h2>
+              <button 
+                onClick={() => setShowMedicalRecord(false)}
+                className="text-gray-500 hover:text-gray-700 text-2xl"
+              >
+                ×
+              </button>
+            </div>
+            
+            {medicalRecord.userProfile && (
+              <div className="mb-6 p-4 bg-gray-50 rounded-lg">
+                <h3 className="text-lg font-semibold mb-2">🏢 ベースカルテ</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div><strong>お名前:</strong> {medicalRecord.userProfile.name}</div>
+                  <div><strong>会社:</strong> {medicalRecord.userProfile.company}</div>
+                  <div><strong>役職:</strong> {medicalRecord.userProfile.position}</div>
+                  <div><strong>部署:</strong> {medicalRecord.userProfile.department}</div>
+                  <div><strong>業界:</strong> {industryMaster[medicalRecord.userProfile.industry]?.label}</div>
+                  <div><strong>規模:</strong> {companySizeMaster[medicalRecord.userProfile.companySize]?.label}</div>
+                </div>
+                
+                {medicalRecord.userProfile.interviewCompletedAt && (
+                  <div className="mt-3 p-3 bg-blue-50 rounded-lg">
+                    <div className="flex items-center space-x-2 mb-2">
+                      <span className="text-blue-600">🎤</span>
+                      <strong className="text-blue-800">AIヒアリング完了</strong>
+                      <span className="text-xs text-blue-600">
+                        {medicalRecord.userProfile.interviewCompletedAt.toLocaleDateString('ja-JP')}
+                      </span>
+                    </div>
+                    {medicalRecord.userProfile.interviewInsights && medicalRecord.userProfile.interviewInsights.length > 0 && (
+                      <div className="text-sm text-blue-700">
+                        <strong>取得インサイト:</strong> {medicalRecord.userProfile.interviewInsights.length}項目
+                      </div>
+                    )}
+                  </div>
+                )}
+                
+                {medicalRecord.userProfile.organizationCulture && medicalRecord.userProfile.organizationCulture.length > 0 && (
+                  <div className="mt-3">
+                    <strong>組織文化:</strong>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {medicalRecord.userProfile.organizationCulture.map((culture, index) => (
+                        <span key={index} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">
+                          {culture}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {medicalRecord.userProfile.personalValues && medicalRecord.userProfile.personalValues.length > 0 && (
+                  <div className="mt-3">
+                    <strong>個人の価値観:</strong>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {medicalRecord.userProfile.personalValues.map((valueId, index) => {
+                        const value = personalValuesMaster.find(v => v.id === valueId);
+                        return value ? (
+                          <span key={index} className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">
+                            {value.label}
+                          </span>
+                        ) : null;
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <div className="mt-3 flex items-center space-x-2">
+                  <strong>ベースカルテ完成度:</strong>
+                  <div className="flex-1 bg-gray-200 rounded-full h-2 max-w-32">
+                    <div 
+                      className="bg-gradient-to-r from-blue-500 to-green-500 h-2 rounded-full"
+                      style={{ width: `${medicalRecord.userProfile.profileCompleteness || 0}%` }}
+                    ></div>
+                  </div>
+                  <span className="text-sm font-bold text-blue-600">{medicalRecord.userProfile.profileCompleteness || 0}%</span>
+                </div>
+              </div>
+            )}
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              <div className="bg-blue-50 p-4 rounded-lg">
+                <div className="text-2xl font-bold text-blue-600">{medicalRecord.totalSessions}</div>
+                <div className="text-sm text-blue-800">総セッション数</div>
+              </div>
+              <div className="bg-green-50 p-4 rounded-lg">
+                <div className="text-2xl font-bold text-green-600">
+                  {medicalRecord.favoriteCoach ? presetCoaches[medicalRecord.favoriteCoach].name : '未設定'}
+                </div>
+                <div className="text-sm text-green-800">お気に入りコーチ</div>
+              </div>
+              <div className="bg-purple-50 p-4 rounded-lg">
+                <div className="text-2xl font-bold text-purple-600">
+                  {Math.round(medicalRecord.sessions.reduce((acc, s) => acc + s.duration, 0) / Math.max(1, medicalRecord.sessions.length))}分
+                </div>
+                <div className="text-sm text-purple-800">平均セッション時間</div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="text-lg font-semibold mb-4">🕒 セッション履歴</h3>
+              {medicalRecord.sessions.length === 0 ? (
+                <p className="text-gray-500 text-center py-8">まだセッション履歴がありません</p>
+              ) : (
+                <div className="space-y-3 max-h-60 overflow-y-auto">
+                  {medicalRecord.sessions.slice().reverse().map((session) => (
+                    <div key={session.id} className="border p-4 rounded-lg">
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-2xl">{presetCoaches[session.coachId].avatar}</span>
+                          <div>
+                            <div className="font-semibold">{presetCoaches[session.coachId].name}</div>
+                            <div className="text-sm text-gray-600">
+                              {session.date.toLocaleDateString()} {session.date.toLocaleTimeString()}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right text-sm text-gray-500">
+                          <div>{session.duration}分</div>
+                          <div>{session.messageCount}メッセージ</div>
+                        </div>
+                      </div>
+                      <div className="text-sm text-gray-700">{session.summary}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // dynamic importで完全にクライアントサイドでのみレンダリング
-const Home = dynamic(() => Promise.resolve(HomeComponent), {
+const HomeWithAuth = dynamic(() => Promise.resolve(() => (
+  <ProtectedRoute>
+    <HomeComponent />
+  </ProtectedRoute>
+)), {
   ssr: false,
   loading: () => (
     <div className="min-h-screen bg-gray-100 flex items-center justify-center">
@@ -3558,4 +3432,4 @@ const Home = dynamic(() => Promise.resolve(HomeComponent), {
   )
 });
 
-export default Home;
+export default HomeWithAuth;
