@@ -1,14 +1,14 @@
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
-import { createClient } from '@supabase/supabase-js'
 
-// クライアントコンポーネント用
-export const supabase = createClientComponentClient()
+// クライアントコンポーネント用（シングルトンパターン）
+let supabaseInstance: ReturnType<typeof createClientComponentClient> | null = null
 
-// サーバーコンポーネント用（必要に応じて）
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-export const supabaseClient = createClient(supabaseUrl, supabaseAnonKey)
+export const supabase = (() => {
+  if (!supabaseInstance) {
+    supabaseInstance = createClientComponentClient()
+  }
+  return supabaseInstance
+})()
 
 // 型定義
 export type Database = {
