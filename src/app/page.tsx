@@ -5,6 +5,8 @@ import dynamic from 'next/dynamic';
 import { ProjectModal } from '@/components/ProjectModal';
 import ProtectedRoute from '@/components/ProtectedRoute'
 import { useAuth } from './providers/AuthProvider'
+import { User } from '@supabase/supabase-js'
+import { ProjectInfoDisplay } from '@/components/ProjectInfoDisplay';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -408,6 +410,110 @@ const ProjectSelectionModal = ({
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+};
+
+// 選択中プロジェクトカルテモーダルコンポーネント
+const SelectedProjectsModal = ({ 
+  isOpen, 
+  onClose, 
+  projectIds,
+  projects,
+  onEdit
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  projectIds: string[];
+  projects: Project[];
+  onEdit: (project: Project) => void;
+}) => {
+  const selectedProjects = projects.filter(p => projectIds.includes(p.id));
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-2xl p-6 w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-bold text-gray-900">📁 選択中のプロジェクトカルテ</h2>
+          <button 
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-700 text-2xl"
+          >
+            ×
+          </button>
+        </div>
+
+        {selectedProjects.length === 0 ? (
+          <div className="text-center py-12 text-gray-500">
+            プロジェクトが選択されていません
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {selectedProjects.map((project, index) => (
+              <div key={project.id} className="bg-gray-50 rounded-lg p-6 border border-gray-200">
+                <div className="flex justify-between items-start mb-4">
+                  <div>
+                    <div className="flex items-center space-x-2 mb-2">
+                      <h3 className="text-lg font-semibold text-gray-900">{project.project_name}</h3>
+                      {index === 0 && (
+                        <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded">メインプロジェクト</span>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-600">
+                      作成日: {new Date(project.created_at).toLocaleDateString('ja-JP')}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => onEdit(project)}
+                    className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
+                  >
+                    編集
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <h4 className="font-medium text-gray-700 mb-1">セッションで叶えたいこと</h4>
+                    <p className="text-gray-600">{project.objectives}</p>
+                  </div>
+
+                  {project.project_purpose && (
+                    <div>
+                      <h4 className="font-medium text-gray-700 mb-1">プロジェクトの目的</h4>
+                      <p className="text-gray-600">{project.project_purpose}</p>
+                    </div>
+                  )}
+
+                  {project.project_goals && (
+                    <div>
+                      <h4 className="font-medium text-gray-700 mb-1">プロジェクトのゴール</h4>
+                      <p className="text-gray-600">{project.project_goals}</p>
+                    </div>
+                  )}
+
+                  {project.user_role && (
+                    <div>
+                      <h4 className="font-medium text-gray-700 mb-1">あなたの役割</h4>
+                      <p className="text-gray-600">{project.user_role}</p>
+                    </div>
+                  )}
+
+                  <div className="flex items-center space-x-2 text-sm text-gray-500 pt-2">
+                    <span>最終更新: {new Date(project.updated_at).toLocaleDateString('ja-JP')}</span>
+                    {project.ai_auto_update_enabled && (
+                      <span className="bg-green-100 text-green-700 px-2 py-1 rounded text-xs">
+                        AI自動更新有効
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1826,6 +1932,7 @@ function HomeComponent() {
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [showProjectSelectionModal, setShowProjectSelectionModal] = useState(false);
+  const [showSelectedProjectsModal, setShowSelectedProjectsModal] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
   const [sessionId, setSessionId] = useState<string>('');
   const [currentScreen, setCurrentScreen] = useState<'home' | 'session'>('home');
@@ -3008,42 +3115,37 @@ function HomeComponent() {
                   </div>
                 </div>
                 <div className="flex space-x-2">
-                  {selectedProjects.length > 0 && (
-                    <div className="flex items-center space-x-4">
-                      <div className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg text-sm">
-                        📁 {selectedProjects.length}個のプロジェクト選択中
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        <span className="text-sm text-gray-600">AIコーチによるプロジェクトカルテ自動更新:</span>
-                        <button
-                          onClick={() => setAiAutoUpdateEnabled(!aiAutoUpdateEnabled)}
-                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                            aiAutoUpdateEnabled ? 'bg-blue-600' : 'bg-gray-300'
-                          }`}
-                        >
-                          <span
-                            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                              aiAutoUpdateEnabled ? 'translate-x-6' : 'translate-x-1'
-                            }`}
-                          />
-                        </button>
-                      </div>
-                    </div>
-                  )}
                   <button
                     onClick={() => setShowProfile(true)}
-                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors"
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
                   >
                     🏢 ベースカルテ
                   </button>
+                  {selectedProjects.length > 0 && (
+                    <button
+                      onClick={() => setShowSelectedProjectsModal(true)}
+                      className="px-4 py-2 bg-blue-100 text-blue-700 rounded-lg hover:bg-blue-200 transition-colors"
+                    >
+                      📁 選択中プロジェクトカルテ
+                    </button>
+                  )}
                   <button
                     onClick={() => setShowMedicalRecord(true)}
-                    className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition-colors"
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
                   >
                     📋 マイページ
                   </button>
                 </div>
               </div>
+              {selectedProjects.length > 0 && (
+                <div className="mt-4">
+                  <ProjectInfoDisplay 
+                    projectIds={selectedProjects}
+                    aiAutoUpdateEnabled={aiAutoUpdateEnabled}
+                    onToggleAIUpdate={() => setAiAutoUpdateEnabled(!aiAutoUpdateEnabled)}
+                  />
+                </div>
+              )}
             </div>
           </header>
 
@@ -3240,6 +3342,19 @@ function HomeComponent() {
         onClose={() => setShowProjectSelectionModal(false)}
         projects={projects}
         onStartSession={handleStartSession}
+      />
+
+      {/* 選択中プロジェクトカルテモーダル */}
+      <SelectedProjectsModal
+        isOpen={showSelectedProjectsModal}
+        onClose={() => setShowSelectedProjectsModal(false)}
+        projectIds={selectedProjects}
+        projects={projects}
+        onEdit={(project) => {
+          setEditingProject(project);
+          setShowProjectModal(true);
+          setShowSelectedProjectsModal(false);
+        }}
       />
 
       {/* プロジェクト作成/編集モーダル */}
