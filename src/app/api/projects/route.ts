@@ -57,6 +57,7 @@ export async function POST(request: Request) {
     const insertData = {
       ...body,
       user_id: user.id,
+      session_count: 0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     }

@@ -10,6 +10,7 @@ interface ProjectModalProps {
 export function ProjectModal({ isOpen, onClose, project, onSave }: ProjectModalProps) {
   const [formData, setFormData] = useState({
     project_name: '',
+    consultation_category: '', // 追加
     objectives: '',
     project_purpose: '',
     project_goals: '',
@@ -25,10 +26,35 @@ export function ProjectModal({ isOpen, onClose, project, onSave }: ProjectModalP
   const [errors, setErrors] = useState<{[key: string]: string}>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  // 相談カテゴリの選択肢
+  const consultationCategories = [
+    {
+      value: 'problem_solving',
+      label: '仕事で起こっている問題を解決したい',
+      description: '問題解決思考を活用します。問題の本質を探り、アクションプランにつなげます'
+    },
+    {
+      value: 'qualitative_goal',
+      label: '定性的な目標を達成したい',
+      description: '問題解決思考を発展的に活用します。企画、育成、管理など様々な定性目標の達成を支援できます。'
+    },
+    {
+      value: 'quantitative_goal',
+      label: '定量的な目標を達成したい',
+      description: 'ゴールまでのプロセスを明確にし、アクションにつなげます。営業職、採用職など目標数値が明確な目標の達成に最適です。'
+    },
+    {
+      value: 'others',
+      label: 'その他',
+      description: '上記に当てはまらない様々なご相談をサポートします。'
+    }
+  ]
+
   useEffect(() => {
     if (project) {
       setFormData({
         project_name: project.project_name || '',
+        consultation_category: project.consultation_category || '', // 追加
         objectives: project.objectives || '',
         project_purpose: project.project_purpose || '',
         project_goals: project.project_goals || '',
@@ -42,6 +68,7 @@ export function ProjectModal({ isOpen, onClose, project, onSave }: ProjectModalP
     } else {
       setFormData({
         project_name: '',
+        consultation_category: '', // 追加
         objectives: '',
         project_purpose: '',
         project_goals: '',
@@ -60,6 +87,10 @@ export function ProjectModal({ isOpen, onClose, project, onSave }: ProjectModalP
     
     if (!formData.project_name.trim()) {
       newErrors.project_name = 'プロジェクト名は必須です'
+    }
+    
+    if (!formData.consultation_category) {
+      newErrors.consultation_category = 'カテゴリを選択してください'
     }
     
     if (!formData.objectives.trim()) {
@@ -101,6 +132,7 @@ export function ProjectModal({ isOpen, onClose, project, onSave }: ProjectModalP
         onClose()
         setFormData({
           project_name: '',
+          consultation_category: '',
           objectives: '',
           project_purpose: '',
           project_goals: '',
@@ -170,6 +202,49 @@ export function ProjectModal({ isOpen, onClose, project, onSave }: ProjectModalP
             />
             {errors.project_name && (
               <p className="text-red-500 text-sm mt-1">{errors.project_name}</p>
+            )}
+          </div>
+
+          {/* 相談カテゴリ選択（2番目の必須項目） */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-3">
+              相談したい内容のカテゴリを選んでください <span className="text-red-500">*</span>
+            </label>
+            <div className="space-y-3">
+              {consultationCategories.map((category) => (
+                <div 
+                  key={category.value}
+                  className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${
+                    formData.consultation_category === category.value
+                      ? 'border-blue-500 bg-blue-50'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                  onClick={() => {
+                    setFormData({ ...formData, consultation_category: category.value })
+                    if (errors.consultation_category) {
+                      setErrors({ ...errors, consultation_category: '' })
+                    }
+                  }}
+                >
+                  <div className="flex items-start space-x-3">
+                    <input
+                      type="radio"
+                      name="consultation_category"
+                      value={category.value}
+                      checked={formData.consultation_category === category.value}
+                      onChange={() => {}}
+                      className="mt-1"
+                    />
+                    <div className="flex-1">
+                      <div className="font-semibold text-gray-900">{category.label}</div>
+                      <div className="text-sm text-gray-600 mt-1">{category.description}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {errors.consultation_category && (
+              <p className="text-red-500 text-sm mt-1">{errors.consultation_category}</p>
             )}
           </div>
 
