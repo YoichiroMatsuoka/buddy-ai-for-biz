@@ -1,175 +1,260 @@
-'use client'
+'use client';
 
-import { useState } from 'react'
-import { useAuth } from '@/app/providers/AuthProvider'
-import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useState } from 'react';
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 export default function SignupPage() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [name, setName] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [success, setSuccess] = useState(false)
-  const { signUp } = useAuth()
-  const router = useRouter()
+  const [formData, setFormData] = useState({
+    email: '',
+    password: '',
+    confirmPassword: '',
+    name: '',
+    company: ''
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const supabase = createClientComponentClient();
+  const router = useRouter();
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError('')
-    setLoading(true)
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFormData({
+      ...formData,
+      [e.target.name]: e.target.value
+    });
+  };
 
-    // バリデーション
-    if (password !== confirmPassword) {
-      setError('パスワードが一致しません')
-      setLoading(false)
-      return
+  const handleSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    setMessage('');
+
+    // パスワード確認
+    if (formData.password !== formData.confirmPassword) {
+      setError('パスワードが一致しません。');
+      setLoading(false);
+      return;
     }
 
-    if (password.length < 8) {
-      setError('パスワードは8文字以上で設定してください')
-      setLoading(false)
-      return
+    if (formData.password.length < 6) {
+      setError('パスワードは6文字以上で設定してください。');
+      setLoading(false);
+      return;
     }
 
     try {
-      await signUp(email, password, name)
-      setSuccess(true)
-    } catch (err: any) {
-      setError(err.message || '登録に失敗しました')
-    } finally {
-      setLoading(false)
-    }
-  }
+      // ユーザー登録
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email: formData.email,
+        password: formData.password,
+        options: {
+          data: {
+            name: formData.name,
+            company: formData.company
+          }
+        }
+      });
 
-  if (success) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="max-w-md w-full space-y-8 text-center">
-          <div className="bg-green-50 p-6 rounded-lg">
-            <h2 className="text-2xl font-bold text-green-800 mb-4">
-              登録ありがとうございます！
-            </h2>
-            <p className="text-green-700">
-              確認メールを送信しました。メール内のリンクをクリックして、
-              アカウントを有効化してください。
-            </p>
-            <Link
-              href="/auth/login"
-              className="mt-4 inline-block text-blue-600 hover:text-blue-500"
-            >
-              ログイン画面へ
-            </Link>
-          </div>
-        </div>
-      </div>
-    )
-  }
+      if (signUpError) {
+        setError(signUpError.message);
+      } else if (data.user) {
+        // Supabaseの仕様：既存ユーザーの場合、identitiesが空配列になる
+        if (data.user.identities && data.user.identities.length === 0) {
+          setError('このメールアドレスは既に登録済みです。ログイン画面からログインしてください。');
+          return;
+        }
+
+        // 新規ユーザーの場合のみプロフィール作成
+        const { error: profileError } = await supabase
+          .from('users_profile')
+          .insert({
+            id: data.user.id,
+            name: formData.name,
+            company: formData.company
+          });
+
+        if (profileError) {
+          // 既にプロフィールが存在する場合もエラーになる
+          if (profileError.code === '23505') { // PostgreSQLの重複エラーコード
+            setError('このメールアドレスは既に登録済みです。ログイン画面からログインしてください。');
+          } else {
+            console.error('プロフィール作成エラー:', profileError);
+            setError('プロフィールの作成に失敗しました。もう一度お試しください。');
+          }
+          
+          // エラーが発生した場合はセッションをクリア
+          await supabase.auth.signOut();
+        } else {
+          setMessage('認証メールを送信しました。メールボックスをご確認ください。');
+          
+          // 3秒後にログイン画面へリダイレクト
+          setTimeout(() => {
+            router.push('/auth/login');
+          }, 3000);
+        }
+      }
+    } catch (err) {
+      setError('登録中にエラーが発生しました。');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <div className="max-w-md w-full space-y-8">
-        <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            新規登録
-          </h2>
-          <p className="mt-2 text-center text-sm text-gray-600">
-            すでにアカウントをお持ちの方は{' '}
-            <Link href="/auth/login" className="font-medium text-blue-600 hover:text-blue-500">
-              ログイン
-            </Link>
-          </p>
-        </div>
-        
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          <div className="space-y-4">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 py-12 px-4 sm:px-6 lg:px-8">
+      <div className="max-w-md w-full">
+        <div className="bg-white rounded-2xl shadow-xl p-8">
+          {/* ロゴエリア */}
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-100 rounded-full mb-4">
+              <span className="text-2xl">🤖</span>
+            </div>
+            <h2 className="text-3xl font-bold text-gray-900">新規登録</h2>
+            <p className="mt-2 text-gray-600">アカウントを作成して始めましょう</p>
+          </div>
+
+          {/* エラーメッセージ */}
+          {error && (
+            <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+              <p className="text-sm text-red-600">{error}</p>
+            </div>
+          )}
+
+          {/* 成功メッセージ */}
+          {message && (
+            <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+              <p className="text-sm text-green-600">{message}</p>
+            </div>
+          )}
+
+          {/* 登録フォーム */}
+          <form onSubmit={handleSignup} className="space-y-6">
             <div>
               <label htmlFor="name" className="block text-sm font-medium text-gray-700">
-                お名前
+                お名前 <span className="text-red-500">*</span>
               </label>
               <input
                 id="name"
                 name="name"
                 type="text"
+                value={formData.name}
+                onChange={handleChange}
                 required
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
+                className="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150"
                 placeholder="山田 太郎"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                disabled={loading}
               />
             </div>
-            
+
+            <div>
+              <label htmlFor="company" className="block text-sm font-medium text-gray-700">
+                会社名 <span className="text-red-500">*</span>
+              </label>
+              <input
+                id="company"
+                name="company"
+                type="text"
+                value={formData.company}
+                onChange={handleChange}
+                required
+                className="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150"
+                placeholder="株式会社○○"
+                disabled={loading}
+              />
+              <p className="mt-1 text-xs text-gray-500">
+                個人事業主など会社に所属していない方は"個人事業主"など自由に記載いただくか"その他"と入力してください
+              </p>
+            </div>
+
             <div>
               <label htmlFor="email" className="block text-sm font-medium text-gray-700">
-                メールアドレス
+                メールアドレス <span className="text-red-500">*</span>
               </label>
               <input
                 id="email"
                 name="email"
                 type="email"
-                autoComplete="email"
+                value={formData.email}
+                onChange={handleChange}
                 required
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
-                placeholder="example@company.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                className="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150"
+                placeholder="your@email.com"
+                disabled={loading}
               />
             </div>
-            
+
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-gray-700">
-                パスワード
+                パスワード <span className="text-red-500">*</span>
               </label>
               <input
                 id="password"
                 name="password"
                 type="password"
-                autoComplete="new-password"
+                value={formData.password}
+                onChange={handleChange}
                 required
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
-                placeholder="8文字以上で設定"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                minLength={6}
+                className="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150"
+                placeholder="6文字以上で入力"
+                disabled={loading}
               />
             </div>
-            
+
             <div>
               <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700">
-                パスワード（確認）
+                パスワード（確認） <span className="text-red-500">*</span>
               </label>
               <input
                 id="confirmPassword"
                 name="confirmPassword"
                 type="password"
-                autoComplete="new-password"
+                value={formData.confirmPassword}
+                onChange={handleChange}
                 required
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm"
-                placeholder="パスワードを再入力"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
+                minLength={6}
+                className="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150"
+                placeholder="もう一度入力"
+                disabled={loading}
               />
             </div>
-          </div>
 
-          {error && (
-            <div className="rounded-md bg-red-50 p-4">
-              <p className="text-sm text-red-800">{error}</p>
-            </div>
-          )}
-
-          <div>
             <button
               type="submit"
               disabled={loading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition duration-150"
             >
-              {loading ? '登録中...' : '登録する'}
+              {loading ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  登録中...
+                </>
+              ) : (
+                '新規登録'
+              )}
             </button>
+          </form>
+
+          {/* ログインリンク */}
+          <div className="mt-6 text-center">
+            <span className="text-sm text-gray-600">
+              既にアカウントをお持ちの方は{' '}
+              <Link
+                href="/auth/login"
+                className="font-medium text-blue-600 hover:text-blue-500 transition duration-150"
+              >
+                ログイン
+              </Link>
+            </span>
           </div>
-        </form>
+        </div>
       </div>
     </div>
-  )
+  );
 }
